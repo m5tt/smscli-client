@@ -100,11 +100,10 @@ class ContactView(View):
         to represent it as a view
     """
 
-    def __init__(self, view_id, display_name, address, content):
-        self.display_name = display_name
+    def __init__(self, view_id, name, address, content):
         self.address = address
         
-        super().__init__(view_id, display_name, content)
+        super().__init__(view_id, name, content)
 
 
 class MainWindow(urwid.Frame):
@@ -122,7 +121,6 @@ class MainWindow(urwid.Frame):
     TITLE_BAR_TEXT = 'smscli'
 
     DIVIDER_ATTR = 'divider'
-    DIVIDER_INIT_TEXT = '-0-'
 
     EDIT_CAPTION = '> '
     MAX_VIEWS = 6
@@ -134,8 +132,9 @@ class MainWindow(urwid.Frame):
         self.current_view = init_view
 
         self.title_bar = urwid.AttrMap(urwid.Text(MainWindow.TITLE_BAR_TEXT), MainWindow.TITLE_BAR_ATTR)
-        self.divider_text = self.DIVIDER_INIT_TEXT
-        self.divider = urwid.AttrMap(urwid.Text(self.divider_text), MainWindow.DIVIDER_ATTR)
+        self.divider = urwid.AttrMap(urwid.Text(''), MainWindow.DIVIDER_ATTR)
+        self.refresh_divider()
+
         self.input_line = urwid.Edit(MainWindow.EDIT_CAPTION)
 
         inner_frame = urwid.Frame(
@@ -149,13 +148,13 @@ class MainWindow(urwid.Frame):
         self.set_focus('footer')
 
     def add_new_view(self, view):
-        if (self.view_count <= self.max_views):
+        if self.view_count <= self.max_views:
             self.shown_views[view.view_id] = view
 
-            ## TODO: Fix this whole shit
-            self.divider_text += '[' + str(self.view_count) + ']'
-            self.divider.original_widget.set_text(self.divider_text)
             self.view_count += 1
+            self.refresh_divider()
+        else:
+            log_view.print_message('Maxed out views')
 
     def switch_view(self, view_id):
         """
@@ -167,6 +166,7 @@ class MainWindow(urwid.Frame):
 
         self.contents['body'][0].contents['body'] = (self.shown_views[view_id].listbox, None)
         self.current_view = self.shown_views[view_id]
+        self.refresh_divider()
 
     def get_input(self):
         return self.input_line.get_edit_text()
@@ -174,9 +174,33 @@ class MainWindow(urwid.Frame):
     def clear_input(self):
         self.input_line.set_edit_text('')
 
+    def refresh_divider(self):
+        """ change divider text """
+
+        self.divider.original_widget.set_text(self.build_divider_text())
+
+
+    def build_divider_text(self):
+        """
+            builds the divider text
+
+            looks like: '[connected]    [0:name0] [1:name1]'
+        """
+
+        divider_text = '[connected]' if connection_handler.connected else '[disconnected]'
+
+        ## do it this way so we can get indices
+        for i, keypair in enumerate(self.shown_views.items()):
+            if keypair[1] is self.current_view:
+                divider_text += ' -' + str(i) + ':' + keypair[1].view_name + '-'
+            else:
+                divider_text += ' [' + str(i) + ':' + keypair[1].view_name + ']'
+
+        return divider_text
+
 
 class ConnectionHandler(object):
-    '''
+    """
         Handles all connection with the server
 
         protocol with server:
@@ -197,7 +221,7 @@ class ConnectionHandler(object):
                    send data of size s
             read:  read 4 bytes to get length len
                    read len bytes
-    '''
+    """
 
     LEN_SIZE = 4
     LEN_STRUCT_FORMAT = '! i'
@@ -206,12 +230,14 @@ class ConnectionHandler(object):
         self.connected = False
 
     def setup_connection(self, ip_address, port):
-        ''' 
+        """
             connects to server, reads initial data
             starts up read loop thread
-        '''
+        """
 
         self.connect(ip_address, port)
+        main_window.refresh_divider()
+
         initial_data = self.read_server()
         self.read_looper = threading.Thread(target=self.read_loop)
         self.read_looper.start()
@@ -231,7 +257,7 @@ class ConnectionHandler(object):
             log_view.print_message(str(e))
 
     def read_server(self):
-        ''' reads a json string from the server '''
+        """ reads a json string from the server """
         
         message = ''
 
@@ -243,28 +269,31 @@ class ConnectionHandler(object):
             message = str(self.socket.recv(length, socket.MSG_WAITALL), 'utf-8')
         except socket.error as e:
             log_view.print_message(str(e))
+            main_window.refresh_divider()
 
         return message
 
     def write_server(self, message):
-        '''
+        """
             write a json string to the server
 
             we use the struct module to correctly send
             the integer size, using network byte order/endianess
-        ''' 
+        """
 
         try: 
             self.socket.sendall(struct.pack(ConnectionHandler.LEN_STRUCT_FORMAT, len(message)))
             self.socket.sendall(message.encode('utf-8'))
         except socket.error as e:
             log_view.print_message(str(e))
+            main_window.refresh_divider()
 
     def read_loop(self):
-        '''
-            indefinitely blocks and reads server
-            on read, updates data structure
-        '''
+        """
+            waits for messages from server
+            when it gets one, manages converting to ViewMessage
+            and adding view to shown views
+        """
 
         while 1:
             json_message = self.read_server()
@@ -274,6 +303,7 @@ class ConnectionHandler(object):
             related_contact_view.add_message(view_message)
 
             if view_message.related_view_id not in main_window.shown_views:
+                log_view.print_message('adding new view')
                 main_window.add_new_view(related_contact_view)
 
             main_loop.draw_screen()
@@ -438,5 +468,5 @@ if __name__ == '__main__':
 
     log_view.print_message('Welcome to smscli')
 
-    main_loop = urwid.MainLoop(main_window, palette, unhandled_input=handle_input)
+    main_loop = urwid.MainLoop(main_window, palette, handle_mouse=False, unhandled_input=handle_input)
     main_loop.run()
