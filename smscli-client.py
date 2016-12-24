@@ -13,7 +13,7 @@ import urwid
 
 COMMAND_PREFIX = '/'        ## all commands start with /
 VIEW_SWITCH_KEY = 'meta'    ## meta/alt key used as prefix for swtiching views
-MAX_MESSAGE_LENGTH = 160    ## each message length max 160 characters
+MAX_MESSAGE_LENGTH = 5355
 
 ## Main data structure, all contacts and conversations with each are stored here
 contact_views = {}
@@ -242,7 +242,7 @@ class ConnectionHandler(object):
         self.read_looper = threading.Thread(target=self.read_loop)
         self.read_looper.start()
 
-        JSONHelper.setup_contact_view_list(initial_data)
+        JSONHelper.setup_contact_views(initial_data)
 
     def connect(self, ip_address, port):
         try:
@@ -289,26 +289,11 @@ class ConnectionHandler(object):
             main_window.refresh_divider()
 
     def read_loop(self):
-        """
-            waits for messages from server
-            when it gets one, manages converting to ViewMessage
-            and adding view to shown views
-        """
+        """ waits for messages from server """
 
         while 1:
             json_message = self.read_server()
-
-            view_message = JSONHelper.json_to_view_message(json_message)
-            related_contact_view = contact_views[view_message.related_view_id]
-            related_contact_view.add_message(view_message)
-
-            if view_message.related_view_id not in main_window.shown_views:
-                log_view.print_message('adding new view')
-                main_window.add_new_view(related_contact_view)
-
-            main_loop.draw_screen()
-
-            ## TODO: Raise notification here
+            handle_receive_message(json_message)
             
 
 class CommandHandler(object):
@@ -365,33 +350,21 @@ class JSONHelper(object):
     def dict_to_contact_view(contact_view_dict):
         """ Convert a contact view dict to a ContactView object """
 
-        ## Convert list of sms dictionaries to a list of ViewMessage objects
-        view_messages = []
-        for view_message_dict in contact_view_dict['conversation']:
-            view_messages.append(ViewMessage(
-                '17:54:33', ## TODO: parse timestamp
-                view_message_dict['relatedContactId'],
-                view_message_dict['body']
-            ))
-
-        ## we want most recent message to be last
-        view_messages = list(reversed(view_messages))
-
         return ContactView(
                 contact_view_dict['id'],
                 contact_view_dict['displayName'],
                 contact_view_dict['phoneNumber'],
-                view_messages
+                []
         )
                 
-    def setup_contact_view_list(json_contact_list):
+    def setup_contact_views(json_contacts):
         """ Convert json to a contact view list """
 
-        contact_view_dicts = json.loads(json_contact_list)
+        log_view.print_message(json_contacts)
+        contact_view_dicts = json.loads(json_contacts)
 
-        for contact_view_dict in contact_view_dicts:
-            contact_view = JSONHelper.dict_to_contact_view(contact_view_dict)
-            contact_views[contact_view.view_id] = contact_view
+        for view_id, contact_view_dict in contact_view_dicts.items():
+            contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
 
         for key in contact_views.keys():
             log_view.print_message(key)
@@ -409,6 +382,33 @@ def handle_view_switch(key):
         pass
 
 
+def add_new_contact(contact_id):
+    """ add number not in contacts to our contact list """
+    contact_views[contact_id] = ContactView(
+            contact_id,
+            contact_id,
+            contact_id,
+            []
+    )
+
+def handle_receive_message(message):
+
+    view_message = JSONHelper.json_to_view_message(message)
+
+    if (view_message.related_view_id not in contact_views):
+        add_new_contact(view_message.related_view_id)
+
+    contact_view = contact_views[view_message.related_view_id]
+    contact_view.add_message(view_message)
+
+    if view_message.related_view_id not in main_window.shown_views:
+        log_view.print_message('adding new view')
+        main_window.add_new_view(contact_view)
+
+    main_loop.draw_screen()
+
+    ## TODO: Raise notification here
+
 def handle_send_message(message):
     """ create a ViewMessage given 
         message  body and current view
@@ -422,6 +422,9 @@ def handle_send_message(message):
                 message
         )
 
+        if main_window.current_view.view_id not in contact_views:
+            add_new_contact(main_window.current_view.view_id)
+
         connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
         main_window.current_view.add_message(view_message)
 
@@ -431,6 +434,10 @@ def handle_send_message(message):
 
 def ctrlc_quit(signum, frame):
     """ trap ctrl-c """
+
+    if (connection_handler.connected):
+        self.read_looper.stop()
+        connection_handler.socket.close()
 
     raise urwid.ExitMainLoop
 
