@@ -22,8 +22,8 @@ class ViewMessage(urwid.Padding):
     """ Represents a single message in a view """ 
 
     LOG_SENDER = 0
-    OUTGOING_SENDER = 1
-    INCOMING_SENDER = 2
+    OUTGOING_SENDER = 'OUTBOX'
+    INCOMING_SENDER = 'INBOX'
 
     LOG_SENDER_ATTR = 'log'
     OUTGOING_SENDER_ATTR = 'outgoing'
@@ -32,27 +32,28 @@ class ViewMessage(urwid.Padding):
     TIME_ATTR = 'time'
     BODY_ATTR = 'body'
 
-    def __init__(self, time, related_view_id, body, message_type):
-        self.time = datetime.datetime.strptime(time, '%H:%M:%S').strftime('%H:%M:%S')
-
-        self.related_view_id = related_view_id
+    def __init__(self, time, body, related_view_id, sender_name, message_type):
+        self.time = time
         self.body = body
+        self.related_view_id = related_view_id
+        self.sender_name = sender_name
+        self.message_type = message_type
 
         self.alignment = 'left'
         self.width_type = 'relative'
         self.width_size = 70
 
         self.sender_attr = ''
-        if message_type == ViewMessage.LOG_SENDER:
+        if self.message_type == ViewMessage.LOG_SENDER:
             self.sender_attr = ViewMessage.LOG_SENDER_ATTR
-        elif message_type == ViewMessage.OUTGOING_SENDER:
+        elif self.message_type == ViewMessage.OUTGOING_SENDER:
             self.sender_attr = ViewMessage.OUTGOING_SENDER_ATTR
-        elif message_type == ViewMessage.INCOMING_SENDER:
-            self.sender_attr == ViewMessage.INCOMING_SENDER_ATTR
+        elif self.message_type == ViewMessage.INCOMING_SENDER:
+            self.sender_attr = ViewMessage.INCOMING_SENDER_ATTR
 
         super().__init__(urwid.Text([
                 (ViewMessage.TIME_ATTR, self.time + ' - '),
-                (self.sender_attr, self.related_view_id + ': '),
+                (self.sender_attr, self.sender_name + ': '),
                 (ViewMessage.BODY_ATTR, self.body)
             ]),
             align=self.alignment,
@@ -101,8 +102,9 @@ class LogView(View):
     def print_message(self, message):
         self.add_message(ViewMessage(
             datetime.datetime.now().time().strftime('%H:%M:%S'),
-            LogView.VIEW_NAME,
             message,
+            LogView.VIEW_NAME,
+            LogView.VIEW_NAME,
             ViewMessage.LOG_SENDER
         ))
 
@@ -118,6 +120,7 @@ class ContactView(View):
 
     def __init__(self, view_id, name, address, content):
         self.address = address
+        self.display_name = name
         
         super().__init__(view_id, name, content)
 
@@ -252,13 +255,16 @@ class ConnectionHandler(object):
         """
 
         self.connect(ip_address, port)
-        main_window.refresh_divider()
 
-        initial_data = self.read_server()
-        self.read_looper = threading.Thread(target=self.read_loop)
-        self.read_looper.start()
+        if self.connected:
+            main_window.refresh_divider()
 
-        JSONHelper.setup_contact_views(initial_data)
+            initial_data = self.read_server()
+
+            self.read_looper = threading.Thread(target=self.read_loop)
+            self.read_looper.start()
+
+            JSONHelper.setup_contact_views(initial_data)
 
     def connect(self, ip_address, port):
         try:
@@ -271,20 +277,22 @@ class ConnectionHandler(object):
             log_view.print_message('Connected to ' + str(self.ip_address) + ' on port: ' + str(self.port))
         except socket.error as e:
             log_view.print_message(str(e))
+            self.connected = False;
 
     def read_server(self):
         """ reads a json string from the server """
         
-        message = ''
-
         try:
+            message = ''
             length = int.from_bytes(
-                    self.socket.recv(self.LEN_SIZE, socket.MSG_WAITALL),
-                    'big'
+                self.socket.recv(self.LEN_SIZE, socket.MSG_WAITALL),
+                'big'
             )
+
             message = str(self.socket.recv(length, socket.MSG_WAITALL), 'utf-8')
         except socket.error as e:
-            log_view.print_message(str(e))
+            log_view.print_message('Lost connection: ' + str(e))
+            self.connection = False
 
         return message
 
@@ -301,17 +309,18 @@ class ConnectionHandler(object):
             self.socket.sendall(message.encode('utf-8'))
         except socket.error as e:
             log_view.print_message('Lost connection: ' + str(e))
+            self.connected = False
 
     def read_loop(self):
         """ waits for messages from server """
 
-        try:
-            while 1:
-                json_message = self.read_server()
+        while self.connected:
+            json_message = self.read_server()
             if (json_message != ''):
                 handle_receive_message(json_message)
-        except socket.error as e:
-            log_view.print_message('Lost connected: ' + str(e))
+
+        main_window.refresh_divider()
+        urwid.draw_screen()
             
 
 class CommandHandler(object):
@@ -349,20 +358,30 @@ class JSONHelper(object):
 
     def view_message_to_json(view_message):
         view_message_dict = {
-                'timestamp': view_message.timestamp,
+                'time': view_message.time,
                 'body': view_message.body,
                 'relatedContactId': view_message.related_view_id,
-                'smsMessageType': 'OUTGOING'
+                'smsMessageType': view_message.message_type
         }
 
         return json.dumps(view_message_dict)
 
     def json_to_view_message(json_view_message):
         view_message_dict = json.loads(json_view_message)
+
+        display_name = ''
+        if view_message_dict['relatedContactId'] in contact_views:
+            display_name = contact_views[view_message_dict['relatedContactId']].display_name
+        else:
+            display_name = view_message_dict['relatedContactId']
+
+        time = datetime.datetime.strptime(view_message_dict['time'], '%H:%M:%S %p').strftime('%H:%M:%S')
+
         return ViewMessage(
-                view_message['time'],
-                view_message_dict['relatedContactId'],
+                time,
                 view_message_dict['body'],
+                view_message_dict['relatedContactId'],
+                display_name,
                 ViewMessage.INCOMING_SENDER
         )
 
@@ -379,7 +398,6 @@ class JSONHelper(object):
     def setup_contact_views(json_contacts):
         """ Convert json to a contact view list """
 
-        log_view.print_message(json_contacts)
         contact_view_dicts = json.loads(json_contacts)
 
         for view_id, contact_view_dict in contact_view_dicts.items():
@@ -387,6 +405,7 @@ class JSONHelper(object):
 
         for key in contact_views.keys():
             log_view.print_message(key)
+
 
 
 def handle_view_switch(key):
@@ -421,12 +440,12 @@ def handle_receive_message(message):
     contact_view.add_message(view_message)
 
     if view_message.related_view_id not in main_window.shown_views:
-        log_view.print_message('adding new view')
         main_window.add_new_view(contact_view)
 
     main_loop.draw_screen()
 
     ## TODO: Raise notification here
+
 
 def handle_send_message(message):
     """ create a ViewMessage given 
@@ -437,8 +456,9 @@ def handle_send_message(message):
     if len(message) <= MAX_MESSAGE_LENGTH:
         view_message = ViewMessage(
                 datetime.datetime.now().time().strftime('%H:%M:%S'),
-                main_window.current_view.view_id,
                 message,
+                main_window.current_view.view_id,
+                main_window.current_view.view_name,
                 ViewMessage.OUTGOING_SENDER
         )
 
@@ -456,7 +476,6 @@ def ctrlc_quit(signum, frame):
     """ trap ctrl-c """
 
     if (connection_handler.connected):
-        connection_handler.read_looper.stop()
         connection_handler.socket.close()
 
     raise urwid.ExitMainLoop
@@ -477,7 +496,7 @@ def handle_input(key):
 
 ## TODO: get this from a file
 palette = [
-    ('time', 'dark blue', 'default'),
+    ('time', 'dark red', 'default'),
     ('log', 'dark blue', 'default'),
     ('incoming', 'dark blue', 'default'),
     ('outgoing', 'dark blue', 'default'),
