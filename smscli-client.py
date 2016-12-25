@@ -21,23 +21,38 @@ contact_views = {}
 class ViewMessage(urwid.Padding):
     """ Represents a single message in a view """ 
 
-    TIMESTAMP_ATTR = 'timestamp'
-    SENDER_ATTR = 'sender'
+    LOG_SENDER = 0
+    OUTGOING_SENDER = 1
+    INCOMING_SENDER = 2
+
+    LOG_SENDER_ATTR = 'log'
+    OUTGOING_SENDER_ATTR = 'outgoing'
+    INCOMING_SENDER_ATTR = 'incoming'
+
+    TIME_ATTR = 'time'
     BODY_ATTR = 'body'
 
-    def __init__(self, timestamp, related_view_id, body):
-        ## TODO: format timestamp and body in a generic manner
-        self.timestamp = timestamp
+    def __init__(self, time, related_view_id, body, message_type):
+        self.time = datetime.datetime.strptime(time, '%H:%M:%S').strftime('%H:%M:%S')
+
         self.related_view_id = related_view_id
         self.body = body
 
         self.alignment = 'left'
         self.width_type = 'relative'
-        self.width_size = 60
+        self.width_size = 70
+
+        self.sender_attr = ''
+        if message_type == ViewMessage.LOG_SENDER:
+            self.sender_attr = ViewMessage.LOG_SENDER_ATTR
+        elif message_type == ViewMessage.OUTGOING_SENDER:
+            self.sender_attr = ViewMessage.OUTGOING_SENDER_ATTR
+        elif message_type == ViewMessage.INCOMING_SENDER:
+            self.sender_attr == ViewMessage.INCOMING_SENDER_ATTR
 
         super().__init__(urwid.Text([
-                (ViewMessage.TIMESTAMP_ATTR, self.timestamp),
-                (ViewMessage.SENDER_ATTR, self.related_view_id),
+                (ViewMessage.TIME_ATTR, self.time + ' - '),
+                (self.sender_attr, self.related_view_id + ': '),
                 (ViewMessage.BODY_ATTR, self.body)
             ]),
             align=self.alignment,
@@ -87,7 +102,8 @@ class LogView(View):
         self.add_message(ViewMessage(
             datetime.datetime.now().time().strftime('%H:%M:%S'),
             LogView.VIEW_NAME,
-            message
+            message,
+            ViewMessage.LOG_SENDER
         ))
 
 
@@ -269,7 +285,6 @@ class ConnectionHandler(object):
             message = str(self.socket.recv(length, socket.MSG_WAITALL), 'utf-8')
         except socket.error as e:
             log_view.print_message(str(e))
-            main_window.refresh_divider()
 
         return message
 
@@ -285,15 +300,18 @@ class ConnectionHandler(object):
             self.socket.sendall(struct.pack(ConnectionHandler.LEN_STRUCT_FORMAT, len(message)))
             self.socket.sendall(message.encode('utf-8'))
         except socket.error as e:
-            log_view.print_message(str(e))
-            main_window.refresh_divider()
+            log_view.print_message('Lost connection: ' + str(e))
 
     def read_loop(self):
         """ waits for messages from server """
 
-        while 1:
-            json_message = self.read_server()
-            handle_receive_message(json_message)
+        try:
+            while 1:
+                json_message = self.read_server()
+            if (json_message != ''):
+                handle_receive_message(json_message)
+        except socket.error as e:
+            log_view.print_message('Lost connected: ' + str(e))
             
 
 class CommandHandler(object):
@@ -342,9 +360,10 @@ class JSONHelper(object):
     def json_to_view_message(json_view_message):
         view_message_dict = json.loads(json_view_message)
         return ViewMessage(
-                '17:54:33', ## TODO: parse timestamp
+                view_message['time'],
                 view_message_dict['relatedContactId'],
-                view_message_dict['body']
+                view_message_dict['body'],
+                ViewMessage.INCOMING_SENDER
         )
 
     def dict_to_contact_view(contact_view_dict):
@@ -373,11 +392,11 @@ class JSONHelper(object):
 def handle_view_switch(key):
     try:
         view_index = int(key.split()[1])
+        view_id = list(main_window.shown_views.items())[view_index][0]
 
-        if (view_index < len(main_window.shown_views)):
-            main_window.switch_view(
-                    list(main_window.shown_views.items())[view_index][0]
-            )
+        if (view_index < len(main_window.shown_views) and
+            main_window.shown_views[view_id] != main_window.current_view):
+                main_window.switch_view(view_id)
     except:
         pass
 
@@ -419,7 +438,8 @@ def handle_send_message(message):
         view_message = ViewMessage(
                 datetime.datetime.now().time().strftime('%H:%M:%S'),
                 main_window.current_view.view_id,
-                message
+                message,
+                ViewMessage.OUTGOING_SENDER
         )
 
         if main_window.current_view.view_id not in contact_views:
@@ -436,7 +456,7 @@ def ctrlc_quit(signum, frame):
     """ trap ctrl-c """
 
     if (connection_handler.connected):
-        self.read_looper.stop()
+        connection_handler.read_looper.stop()
         connection_handler.socket.close()
 
     raise urwid.ExitMainLoop
@@ -457,8 +477,10 @@ def handle_input(key):
 
 ## TODO: get this from a file
 palette = [
-    ('timestamp', 'dark blue', 'default'),
-    ('sender', 'dark blue', 'default'),
+    ('time', 'dark blue', 'default'),
+    ('log', 'dark blue', 'default'),
+    ('incoming', 'dark blue', 'default'),
+    ('outgoing', 'dark blue', 'default'),
     ('titlebar', 'black', 'dark blue'),
     ('divider', 'black', 'dark blue')
 ]
