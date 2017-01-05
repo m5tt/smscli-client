@@ -1,6 +1,5 @@
 #/usr/bin/python
 
-import sys
 import json
 import struct
 import signal
@@ -11,12 +10,12 @@ import collections
 
 import urwid
 
-COMMAND_PREFIX = '/'        ## all commands start with /
-VIEW_SWITCH_KEY = 'meta'    ## meta/alt key used as prefix for swtiching views
+VIEW_SWITCH_KEY = 'meta'    # meta/alt key used as prefix for switching views
 MAX_MESSAGE_LENGTH = 5355
 
-## Main data structure, all contacts and conversations with each are stored here
+# Main data structure, all contacts and conversations with each are stored here
 contact_views = {}
+
 
 class ViewMessage(urwid.Padding):
     """ Represents a single message in a view """ 
@@ -76,9 +75,6 @@ class View(object):
         self.view_name = view_name
         self.listwalker = urwid.SimpleFocusListWalker(content)
         self.listbox = urwid.ListBox(self.listwalker)
-
-    def add_message(self, view_message):
-        self.listwalker.append(view_message)
 
     def scroll_to_bottom(self):
         self.listbox.set_focus(len(self.listwalker) - 1)
@@ -145,10 +141,7 @@ class MainWindow(urwid.Frame):
     MAX_VIEWS = 6
 
     def __init__(self, init_view):
-        self.shown_views = collections.OrderedDict({init_view.view_id: init_view })
-        self.view_count = 1;
-        self.max_views = 6
-        self.current_view = init_view
+        self.init_views(init_view)
 
         self.title_bar = urwid.AttrMap(urwid.Text(MainWindow.TITLE_BAR_TEXT), MainWindow.TITLE_BAR_ATTR)
         self.divider = urwid.AttrMap(urwid.Text(''), MainWindow.DIVIDER_ATTR)
@@ -166,11 +159,19 @@ class MainWindow(urwid.Frame):
 
         self.set_focus('footer')
 
+    def init_views(self, init_view):
+        """
+            initialise the views
+            make this a method so we can call it when connecting to reset
+        """
+        self.shown_views = collections.OrderedDict({init_view.view_id: init_view})    # subset of views being shown
+        self.max_views = MainWindow.MAX_VIEWS
+        self.current_view = init_view
+
     def add_new_view(self, view):
-        if self.view_count <= self.max_views:
+        if len(self.shown_views) <= self.max_views:
             self.shown_views[view.view_id] = view
 
-            self.view_count += 1
             self.refresh_divider()
         else:
             log_view.print_message('Maxed out views')
@@ -196,19 +197,17 @@ class MainWindow(urwid.Frame):
     def refresh_divider(self):
         """ change divider text """
 
-        self.divider.original_widget.set_text(self.build_divider_text())
+        self.divider.original_widget.set_text(self.gen_divider_text())
 
-
-    def build_divider_text(self):
+    def gen_divider_text(self):
         """
-            builds the divider text
-
-            looks like: '[connected]    [0:name0] [1:name1]'
+            generate divider text using current show views
+            looks like: '[connected]    [0:contact_name1] [1:contact_name2]'
         """
 
         divider_text = '[connected]' if connection_handler.connected else '[disconnected]'
 
-        ## do it this way so we can get indices
+        # do it this way so we can get indices
         for i, keypair in enumerate(self.shown_views.items()):
             if keypair[1] is self.current_view:
                 divider_text += ' -' + str(i) + ':' + keypair[1].view_name + '-'
@@ -242,8 +241,8 @@ class ConnectionHandler(object):
                    read len bytes
     """
 
-    LEN_SIZE = 4
-    LEN_STRUCT_FORMAT = '! i'
+    LEN_BYTE_SIZE = 4               # byte size of message length
+    LEN_STRUCT_FORMAT = '! i'       # format chars for struct holding message length
 
     def __init__(self):
         self.connected = False
@@ -260,11 +259,15 @@ class ConnectionHandler(object):
             main_window.refresh_divider()
 
             initial_data = self.read_server()
+            JSONHelper.setup_contact_views(initial_data)
+
+            # ensure all views except log are closed so we don't have out of date views on reconnects
+            main_window.init_views(log_view)
 
             self.read_looper = threading.Thread(target=self.read_loop)
             self.read_looper.start()
 
-            JSONHelper.setup_contact_views(initial_data)
+            log_view.print_message('Connected to ' + str(self.ip_address) + ' on port: ' + str(self.port))
 
     def connect(self, ip_address, port):
         try:
@@ -273,26 +276,31 @@ class ConnectionHandler(object):
 
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((ip_address, int(port)))
+
             self.connected = True
-            log_view.print_message('Connected to ' + str(self.ip_address) + ' on port: ' + str(self.port))
         except socket.error as e:
             log_view.print_message(str(e))
-            self.connected = False;
+            self.connected = False
 
     def read_server(self):
         """ reads a json string from the server """
         
+        message = ''
+
         try:
-            message = ''
             length = int.from_bytes(
-                self.socket.recv(self.LEN_SIZE, socket.MSG_WAITALL),
+                self.socket.recv(self.LEN_BYTE_SIZE, socket.MSG_WAITALL),
                 'big'
             )
 
             message = str(self.socket.recv(length, socket.MSG_WAITALL), 'utf-8')
-        except socket.error as e:
-            log_view.print_message('Lost connection: ' + str(e))
-            self.connection = False
+
+            # clean disconnect will not raise socket.error, so do it ourselves
+            if message == '':
+                raise socket.error
+        except socket.error:
+            log_view.print_message('Disconnected')
+            self.connected = False
 
         return message
 
@@ -301,7 +309,7 @@ class ConnectionHandler(object):
             write a json string to the server
 
             we use the struct module to correctly send
-            the integer size, using network byte order/endianess
+           the integer size, using network byte order
         """
 
         try: 
@@ -316,36 +324,60 @@ class ConnectionHandler(object):
 
         while self.connected:
             json_message = self.read_server()
-            if (json_message != ''):
+            if json_message != '':
                 handle_receive_message(json_message)
 
-        main_window.refresh_divider()
-        urwid.draw_screen()
+        # if this is a shutdown, urwid raises an assertion error when we do this
+        try:
+            main_window.refresh_divider()
+            main_loop.draw_screen()
+        except AssertionError:
+            pass
             
 
 class CommandHandler(object):
     """
-        Parses and handles all commands
-
-        Handles some, delegates others to
-        external objects 
+        Parses and handles commands
     """
+    COMMAND_PREFIX = '/'        # all commands start with /
+    COMMAND_METHOD_PREFIX = 'do_'
+    HELP_MESSAGE_PREFIX = 'help_'
+    DEFAULT_HELP_MESSAGE = 'Usage: /<command> <args>'   # TODO: make this longer
+
+    # help messages
+    help_connect = 'Usage: connect <ip> <port>'
 
     def parse_command(self, command):
+        # break up command
         command_parts = command[1:].split()
         command_name = command_parts[0]
         command_args = command_parts[1:]
 
-        ## TODO: handle args properly
+        # call method associated to command
+        command_method_str = CommandHandler.COMMAND_METHOD_PREFIX + command_name;
 
-        if (command_name == 'connect'):
-            connection_handler.setup_connection(
-                    command_args[0], 
-                    command_args[1]
-            )
+        try:
+            getattr(self, command_method_str)(command_args)
+        except AttributeError as e:
+            self.do_help([])
 
-    def print_help(self, command):
+    def do_connect(self, args):
+        num_args = 2
+
+        if len(args) == num_args:
+            connection_handler.setup_connection(args[0], args[1])
+        else:
+            self.do_help(['connect'])
+
+    def do_msg(self, args):
         pass
+
+    def do_help(self, args):
+        if len(args) == 0:
+            log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE);
+        else:
+            help_message = CommandHandler.HELP_MESSAGE_PREFIX + args[0]
+            log_view.print_message(getattr(CommandHandler, help_message))
 
 
 class JSONHelper(object):
@@ -369,11 +401,13 @@ class JSONHelper(object):
     def json_to_view_message(json_view_message):
         view_message_dict = json.loads(json_view_message)
 
-        display_name = ''
-        if view_message_dict['relatedContactId'] in contact_views:
-            display_name = contact_views[view_message_dict['relatedContactId']].display_name
+        if view_message_dict['smsMessageType'] == ViewMessage.OUTGOING_SENDER:
+            display_name = 'Me'
         else:
-            display_name = view_message_dict['relatedContactId']
+            if view_message_dict['relatedContactId'] in contact_views:
+                display_name = contact_views[view_message_dict['relatedContactId']].display_name
+            else:
+                display_name = view_message_dict['relatedContactId']
 
         time = datetime.datetime.strptime(view_message_dict['time'], '%H:%M:%S %p').strftime('%H:%M:%S')
 
@@ -382,7 +416,7 @@ class JSONHelper(object):
                 view_message_dict['body'],
                 view_message_dict['relatedContactId'],
                 display_name,
-                ViewMessage.INCOMING_SENDER
+                view_message_dict['smsMessageType']
         )
 
     def dict_to_contact_view(contact_view_dict):
@@ -403,19 +437,15 @@ class JSONHelper(object):
         for view_id, contact_view_dict in contact_view_dicts.items():
             contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
 
-        for key in contact_views.keys():
-            log_view.print_message(key)
-
-
 
 def handle_view_switch(key):
     try:
         view_index = int(key.split()[1])
         view_id = list(main_window.shown_views.items())[view_index][0]
 
-        if (view_index < len(main_window.shown_views) and
-            main_window.shown_views[view_id] != main_window.current_view):
-                main_window.switch_view(view_id)
+        if view_index < len(main_window.shown_views) and \
+                main_window.shown_views[view_id] != main_window.current_view:
+            main_window.switch_view(view_id)
     except:
         pass
 
@@ -429,11 +459,12 @@ def add_new_contact(contact_id):
             []
     )
 
+
 def handle_receive_message(message):
 
     view_message = JSONHelper.json_to_view_message(message)
 
-    if (view_message.related_view_id not in contact_views):
+    if view_message.related_view_id not in contact_views:
         add_new_contact(view_message.related_view_id)
 
     contact_view = contact_views[view_message.related_view_id]
@@ -444,7 +475,7 @@ def handle_receive_message(message):
 
     main_loop.draw_screen()
 
-    ## TODO: Raise notification here
+    # TODO: Raise notification here
 
 
 def handle_send_message(message):
@@ -458,7 +489,7 @@ def handle_send_message(message):
                 datetime.datetime.now().time().strftime('%H:%M:%S'),
                 message,
                 main_window.current_view.view_id,
-                main_window.current_view.view_name,
+                'Me',
                 ViewMessage.OUTGOING_SENDER
         )
 
@@ -472,34 +503,40 @@ def handle_send_message(message):
     else:
         log_view.print_message('Message to long')
 
+
 def ctrlc_quit(signum, frame):
     """ trap ctrl-c """
-
-    if (connection_handler.connected):
-        connection_handler.socket.close()
-
-    raise urwid.ExitMainLoop
+    shutdown()
 
 
 def handle_input(key):
     if key == 'enter':
         user_input = main_window.get_input()
-        if user_input[0] == COMMAND_PREFIX:
+        if user_input[0] == CommandHandler.COMMAND_PREFIX:
             command_handler.parse_command(user_input)
             main_window.clear_input()
-        elif (connection_handler.connected) and (main_window.current_view != log_view):
+        elif connection_handler.connected and (main_window.current_view != log_view):
             handle_send_message(user_input)
     elif VIEW_SWITCH_KEY in key:
         handle_view_switch(key)
 
 
+def shutdown():
+    if connection_handler.connected:
+        # stop read looper thread
+        connection_handler.connected = False
+        connection_handler.socket.shutdown(socket.SHUT_RDWR)
+        connection_handler.socket.close()
 
-## TODO: get this from a file
+    raise urwid.ExitMainLoop
+
+
+# TODO: get this from a file
 palette = [
     ('time', 'dark red', 'default'),
     ('log', 'dark blue', 'default'),
     ('incoming', 'dark blue', 'default'),
-    ('outgoing', 'dark blue', 'default'),
+    ('outgoing', 'dark green', 'default'),
     ('titlebar', 'black', 'dark blue'),
     ('divider', 'black', 'dark blue')
 ]
