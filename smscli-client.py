@@ -1,5 +1,7 @@
 #/usr/bin/python
 
+# TODO: make strings generic
+
 import json
 import struct
 import signal
@@ -345,7 +347,8 @@ class CommandHandler(object):
     DEFAULT_HELP_MESSAGE = 'Usage: /<command> <args>'   # TODO: make this longer
 
     # help messages
-    help_connect = 'Usage: connect <ip> <port>'
+    help_connect = 'Usage: /connect <ip> <port>'
+    help_msg = 'Usage: /msg <contact_name/phone_number>'
 
     def parse_command(self, command):
         # break up command
@@ -358,23 +361,67 @@ class CommandHandler(object):
 
         try:
             getattr(self, command_method_str)(command_args)
-        except AttributeError as e:
+        except AttributeError:
+            # command does not exist
             self.do_help([])
 
     def do_connect(self, args):
+        """
+            /connect <ip> <port>
+            connects to a smscli-server on the given ip and port
+        """
+
         num_args = 2
 
         if len(args) == num_args:
-            connection_handler.setup_connection(args[0], args[1])
+            if not connection_handler.connected:
+                connection_handler.setup_connection(args[0], args[1])
+            else:
+                log_view.print_message("Already connected")
         else:
             self.do_help(['connect'])
 
     def do_msg(self, args):
-        pass
+        """
+            /msg <contact_name/phone_number> - opens a new contact view
+            if contact doesnt exist, will create one using given phone number
+
+            invalid phone numbers and such are left for the server to deal with
+        """
+
+        num_args = 1
+
+        if connection_handler.connected:
+            if len(args) == num_args:
+                name = args[0]
+                matched_views = [view for view in contact_views.values() if view.display_name.lower() == name.lower()]
+
+                if len(matched_views):
+                    for view in matched_views:      # could be multiple contacts with same name -just open all
+                        if view.view_id not in main_window.shown_views:
+                            main_window.add_new_view(view)
+                else:
+                    contact_views[name] = ContactView(
+                        name,
+                        name,
+                        name,
+                        []
+                    )
+
+                    contact_view = contact_views[name]
+                    main_window.add_new_view(contact_view)
+            else:
+                self.do_help(['msg'])
+        else:
+            log_view.print_message("Not connected")
+
+    def do_quit(self, args):
+        exit()
 
     def do_help(self, args):
         if len(args) == 0:
-            log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE);
+            log_view.print_message("Unknown command")
+            log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE)
         else:
             help_message = CommandHandler.HELP_MESSAGE_PREFIX + args[0]
             log_view.print_message(getattr(CommandHandler, help_message))
@@ -382,7 +429,7 @@ class CommandHandler(object):
 
 class JSONHelper(object):
     """
-        Util methods for converting between 
+        Util methods for converting between
         JSON strings and objects used here
 
         Is aware of dict keys used in json
@@ -428,7 +475,7 @@ class JSONHelper(object):
                 contact_view_dict['phoneNumber'],
                 []
         )
-                
+
     def setup_contact_views(json_contacts):
         """ Convert json to a contact view list """
 
@@ -437,6 +484,8 @@ class JSONHelper(object):
         for view_id, contact_view_dict in contact_view_dicts.items():
             contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
 
+
+# TODO: make util class, find classes for these functions
 
 def handle_view_switch(key):
     try:
@@ -473,6 +522,7 @@ def handle_receive_message(message):
     if view_message.related_view_id not in main_window.shown_views:
         main_window.add_new_view(contact_view)
 
+    # were in another thread so we have to do this to tell urwid to render
     main_loop.draw_screen()
 
     # TODO: Raise notification here
