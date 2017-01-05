@@ -11,6 +11,7 @@ import datetime
 import threading
 import collections
 import configparser
+import time
 
 import gi
 import urwid
@@ -19,7 +20,7 @@ from gi.repository import Notify
 
 
 VIEW_SWITCH_KEY = 'meta'    # meta/alt key used as prefix for switching views
-MAX_MESSAGE_LENGTH = 5355
+MAX_MESSAGE_LEN = 300
 
 # Main data structure, all contacts and conversations with each are stored here
 contact_views = {}
@@ -91,6 +92,9 @@ class View(object):
         self.listwalker.append(view_message)
         self.scroll_to_bottom()
 
+    def add_messages(self, view_messages):
+        self.listwalker += view_messages
+        self.scroll_to_bottom()
 
 class LogView(View):
     """
@@ -261,6 +265,8 @@ class ConnectionHandler(object):
             starts up read loop thread
         """
 
+        # TODO: error handling
+
         self.connect(ip_address, port)
 
         if self.connected:
@@ -377,15 +383,21 @@ class CommandHandler(object):
             connects to a smscli-server on the given ip and port
         """
 
-        num_args = 2
+        if not connection_handler.connected:
+            if len(args) > 0:
+                if len(args) == 1:
+                    conn_set = config_handler.get_alias(args[0])
+                else:
+                    conn_set = args
 
-        if len(args) == num_args:
-            if not connection_handler.connected:
-                connection_handler.setup_connection(args[0], args[1])
+                if conn_set is not None and len(conn_set) == 2:
+                    connection_handler.setup_connection(conn_set[0], conn_set[1])
+                else:
+                    self.do_help(['connect'])
             else:
-                log_view.print_message("Already connected")
+                self.do_help(['connect'])
         else:
-            self.do_help(['connect'])
+            log_view.print_message("Already connected")
 
     def do_msg(self, args):
         """
@@ -416,10 +428,14 @@ class CommandHandler(object):
 
                     contact_view = contact_views[name]
                     main_window.add_new_view(contact_view)
+                    main_window.switch_view(contact_view.view_id)
             else:
                 self.do_help(['msg'])
         else:
             log_view.print_message("Not connected")
+
+    def do_disconnect(self, args):
+        pass
 
     def do_quit(self, args):
         exit()
@@ -528,10 +544,6 @@ class ThemeFormatter(object):
     @staticmethod
     def dict_to_list_format(dict_theme):
         """"""
-        """"
-        return [(attr_name, split[ThemeFormatter.FOREGROUND_INDICE], colors[ThemeFormatter.BACKGROUND_INDICE])
-                for attr_name, colors_str in dict_theme.items()]
-        """
 
         list_theme = []
         for attr_name, colors_str in dict_theme.items():
@@ -556,6 +568,9 @@ class ConfigHandler(object):
     CONFIG_FILE_PATH = CONFIG_DIR_PATH + CONFIG_FILE_NAME
 
     SECTION_THEME = 'Theme'
+    SECTION_ALIASES = 'Aliases'
+
+    # TODO: use os helpers, like join
 
     def init_config(self):
         self.config = configparser.ConfigParser()
@@ -593,6 +608,19 @@ class ConfigHandler(object):
     def get_theme(self):
         if self.config.has_section(ConfigHandler.SECTION_THEME):
             return ThemeFormatter.dict_to_list_format(self.config[ConfigHandler.SECTION_THEME])
+
+    def get_alias(self, alias_name):
+        if self.config.has_section(ConfigHandler.SECTION_ALIASES):
+            conn_set = [self.config[ConfigHandler.SECTION_ALIASES][name]
+                        for name in self.config.options(ConfigHandler.SECTION_ALIASES)
+                        if name == alias_name]
+
+            conn_set = [part.strip(',') for part in conn_set[0].split(',')]
+            conn_set[1] = int(conn_set[1])
+
+            return conn_set
+        else:
+            return None
 
 
 # TODO: make util class, find classes for these functions
@@ -639,33 +667,30 @@ def handle_receive_message(message):
     # were in another thread so we have to do this to tell urwid to render
     main_loop.draw_screen()
 
-    # TODO: Raise notification here
-
 
 def handle_send_message(message):
-    """ create a ViewMessage given 
-        message  body and current view
+    """
+        create a ViewMessage given message  body and current view
         then send and add to view
     """
 
-    if len(message) <= MAX_MESSAGE_LENGTH:
-        view_message = ViewMessage(
-                datetime.datetime.now().time().strftime('%H:%M:%S'),
-                message,
-                main_window.current_view.view_id,
-                'Me',
-                ViewMessage.OUTGOING_SENDER
-        )
-
-        if main_window.current_view.view_id not in contact_views:
-            add_new_contact(main_window.current_view.view_id)
-
-        connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
-        main_window.current_view.add_message(view_message)
-
-        main_window.clear_input()
+    if len(message) > MAX_MESSAGE_LEN:
+        # break messages into MAX_MESSAGE_LEN chunks
+        messages = [message[i:i+MAX_MESSAGE_LEN] for i in range(0, len(message), MAX_MESSAGE_LEN)]
     else:
-        log_view.print_message('Message to long')
+        messages = [message]
+
+    view_messages = [ViewMessage(datetime.datetime.now().time().strftime('%H:%M:%S'), message,
+                                 main_window.current_view.view_id, 'Me', ViewMessage.OUTGOING_SENDER)
+                     for message in messages]
+
+    main_window.current_view.add_messages(view_messages)
+
+    for view_message in view_messages:
+        connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
+        time.sleep(0.2)
+
+    main_window.clear_input()
 
 
 def ctrlc_quit(signum, frame):
@@ -676,7 +701,7 @@ def ctrlc_quit(signum, frame):
 def handle_input(key):
     if key == 'enter':
         user_input = main_window.get_input()
-        if user_input[0] == CommandHandler.COMMAND_PREFIX:
+        if len(user_input) and user_input[0] == CommandHandler.COMMAND_PREFIX:
             command_handler.parse_command(user_input)
             main_window.clear_input()
         elif connection_handler.connected and (main_window.current_view != log_view):
