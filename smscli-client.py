@@ -96,6 +96,7 @@ class View(object):
         self.listwalker += view_messages
         self.scroll_to_bottom()
 
+
 class LogView(View):
     """
         The main central view, that smscli logs output too
@@ -339,7 +340,7 @@ class ConnectionHandler(object):
         while self.connected:
             json_message = self.read_server()
             if json_message != '':
-                handle_receive_message(json_message)
+                self.receive_message(json_message)
 
         # if this is a shutdown, urwid raises an assertion error when we do this
         try:
@@ -347,7 +348,51 @@ class ConnectionHandler(object):
             main_loop.draw_screen()
         except AssertionError:
             pass
-            
+
+    def receive_message(self, message):
+
+        view_message = JSONHelper.json_to_view_message(message)
+
+        if view_message.related_view_id not in contact_views:
+            add_new_contact(view_message.related_view_id)
+
+        contact_view = contact_views[view_message.related_view_id]
+        contact_view.add_message(view_message)
+
+        if view_message.related_view_id not in main_window.shown_views:
+            main_window.add_new_view(contact_view)
+
+        if Notify.init(contact_view.display_name):
+            notification = Notify.Notification.new(contact_view.display_name, view_message.body)
+            notification.show()
+
+        # were in another thread so we have to do this to tell urwid to render
+        main_loop.draw_screen()
+
+    def send_message(self, message):
+        """
+            create a ViewMessage given message  body and current view
+            then send and add to view
+        """
+
+        if len(message) > MAX_MESSAGE_LEN:
+            # break messages into MAX_MESSAGE_LEN chunks
+            messages = [message[i:i+MAX_MESSAGE_LEN] for i in range(0, len(message), MAX_MESSAGE_LEN)]
+        else:
+            messages = [message]
+
+        view_messages = [ViewMessage(datetime.datetime.now().time().strftime('%H:%M:%S'), message,
+                                     main_window.current_view.view_id, 'Me', ViewMessage.OUTGOING_SENDER)
+                         for message in messages]
+
+        main_window.current_view.add_messages(view_messages)
+
+        for view_message in view_messages:
+            connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
+            time.sleep(0.2)
+
+        main_window.clear_input()
+
 
 class CommandHandler(object):
     """
@@ -436,6 +481,7 @@ class CommandHandler(object):
 
     def do_disconnect(self, args):
         pass
+        # TODO
 
     def do_quit(self, args):
         exit()
@@ -623,92 +669,47 @@ class ConfigHandler(object):
             return None
 
 
-# TODO: make util class, find classes for these functions
+class InputHandler(object):
+    """ handles and delegates any kind of input from the user """
 
-def handle_view_switch(key):
-    try:
-        view_index = int(key.split()[1])
-        view_id = list(main_window.shown_views.items())[view_index][0]
+    def handle_input(self, key):
+        """ callback method called by urwid """
 
-        if view_index < len(main_window.shown_views) and \
-                main_window.shown_views[view_id] != main_window.current_view:
-            main_window.switch_view(view_id)
-    except:
-        pass
+        if key == 'enter':
+            user_input = main_window.get_input()
+            if len(user_input) and user_input[0] == CommandHandler.COMMAND_PREFIX:
+                command_handler.parse_command(user_input)
+                main_window.clear_input()
+            elif connection_handler.connected and (main_window.current_view != log_view):
+                connection_handler.send_message(user_input)
+        elif VIEW_SWITCH_KEY in key:
+            self.handle_view_switch(key)
+
+    def handle_view_switch(self, key):
+        try:
+            view_index = int(key.split()[1])
+            view_id = list(main_window.shown_views.items())[view_index][0]
+
+            if view_index < len(main_window.shown_views) and \
+                            main_window.shown_views[view_id] != main_window.current_view:
+                main_window.switch_view(view_id)
+        except:
+            pass
+
+    def ctrl_c_quit(signum, frame):
+        """ trap ctrl-c """
+        shutdown()
 
 
+"""
 def add_new_contact(contact_id):
-    """ add number not in contacts to our contact list """
     contact_views[contact_id] = ContactView(
             contact_id,
             contact_id,
             contact_id,
             []
     )
-
-
-def handle_receive_message(message):
-
-    view_message = JSONHelper.json_to_view_message(message)
-
-    if view_message.related_view_id not in contact_views:
-        add_new_contact(view_message.related_view_id)
-
-    contact_view = contact_views[view_message.related_view_id]
-    contact_view.add_message(view_message)
-
-    if view_message.related_view_id not in main_window.shown_views:
-        main_window.add_new_view(contact_view)
-
-    if Notify.init(contact_view.display_name):
-        notification = Notify.Notification.new(contact_view.display_name, view_message.body)
-        notification.show()
-
-    # were in another thread so we have to do this to tell urwid to render
-    main_loop.draw_screen()
-
-
-def handle_send_message(message):
-    """
-        create a ViewMessage given message  body and current view
-        then send and add to view
-    """
-
-    if len(message) > MAX_MESSAGE_LEN:
-        # break messages into MAX_MESSAGE_LEN chunks
-        messages = [message[i:i+MAX_MESSAGE_LEN] for i in range(0, len(message), MAX_MESSAGE_LEN)]
-    else:
-        messages = [message]
-
-    view_messages = [ViewMessage(datetime.datetime.now().time().strftime('%H:%M:%S'), message,
-                                 main_window.current_view.view_id, 'Me', ViewMessage.OUTGOING_SENDER)
-                     for message in messages]
-
-    main_window.current_view.add_messages(view_messages)
-
-    for view_message in view_messages:
-        connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
-        time.sleep(0.2)
-
-    main_window.clear_input()
-
-
-def ctrlc_quit(signum, frame):
-    """ trap ctrl-c """
-    shutdown()
-
-
-def handle_input(key):
-    if key == 'enter':
-        user_input = main_window.get_input()
-        if len(user_input) and user_input[0] == CommandHandler.COMMAND_PREFIX:
-            command_handler.parse_command(user_input)
-            main_window.clear_input()
-        elif connection_handler.connected and (main_window.current_view != log_view):
-            handle_send_message(user_input)
-    elif VIEW_SWITCH_KEY in key:
-        handle_view_switch(key)
-
+"""
 
 def shutdown():
     if connection_handler.connected:
@@ -720,9 +721,11 @@ def shutdown():
     raise urwid.ExitMainLoop
 
 if __name__ == '__main__':
+    """ wow someones original """
     command_handler = CommandHandler()
     connection_handler = ConnectionHandler()
     config_handler = ConfigHandler()
+    input_handler = InputHandler()
 
     if not config_handler.init_config():
         print('Failed to load config file')
@@ -738,11 +741,10 @@ if __name__ == '__main__':
 
     main_window = MainWindow(log_view)
 
-    signal.signal(signal.SIGINT, ctrlc_quit)
+    signal.signal(signal.SIGINT, InputHandler.ctrl_c_quit)
 
     try:
-        main_loop = urwid.MainLoop(main_window, theme, handle_mouse=False, unhandled_input=handle_input)
+        main_loop = urwid.MainLoop(main_window, theme, handle_mouse=False, unhandled_input=input_handler.handle_input)
         main_loop.run()
     except urwid.AttrSpecError as e:
         print('Failed to initialize window: ' + str(e))
-
