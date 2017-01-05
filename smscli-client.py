@@ -12,7 +12,11 @@ import threading
 import collections
 import configparser
 
+import gi
 import urwid
+gi.require_version('Notify', '0.7')
+from gi.repository import Notify
+
 
 VIEW_SWITCH_KEY = 'meta'    # meta/alt key used as prefix for switching views
 MAX_MESSAGE_LENGTH = 5355
@@ -627,6 +631,10 @@ def handle_receive_message(message):
 
     if view_message.related_view_id not in main_window.shown_views:
         main_window.add_new_view(contact_view)
+
+    if Notify.init(contact_view.display_name):
+        notification = Notify.Notification.new(contact_view.display_name, view_message.body)
+        notification.show()
 
     # were in another thread so we have to do this to tell urwid to render
     main_loop.draw_screen()
