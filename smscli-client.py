@@ -3,12 +3,14 @@
 # TODO: make strings generic
 
 import json
+import os
 import struct
 import signal
 import socket
 import datetime
 import threading
 import collections
+import configparser
 
 import urwid
 
@@ -435,6 +437,7 @@ class JSONHelper(object):
         Is aware of dict keys used in json
     """
 
+    @staticmethod
     def view_message_to_json(view_message):
         view_message_dict = {
                 'time': view_message.time,
@@ -445,6 +448,7 @@ class JSONHelper(object):
 
         return json.dumps(view_message_dict)
 
+    @staticmethod
     def json_to_view_message(json_view_message):
         view_message_dict = json.loads(json_view_message)
 
@@ -466,6 +470,7 @@ class JSONHelper(object):
                 view_message_dict['smsMessageType']
         )
 
+    @staticmethod
     def dict_to_contact_view(contact_view_dict):
         """ Convert a contact view dict to a ContactView object """
 
@@ -476,6 +481,7 @@ class JSONHelper(object):
                 []
         )
 
+    @staticmethod
     def setup_contact_views(json_contacts):
         """ Convert json to a contact view list """
 
@@ -483,6 +489,106 @@ class JSONHelper(object):
 
         for view_id, contact_view_dict in contact_view_dicts.items():
             contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
+
+
+class ThemeFormatter(object):
+    """
+        small static class to handle theme
+        stores default theme and has helpers
+        for formatting it
+
+        stored in configparser format
+
+        two formats:
+            dict format: theme: { attr_name: 'foreground, background' }
+            tuple format: [ ('attr_name', 'foreground', 'background') ]
+
+
+        dict format is for configparser, so it can be written to a config file
+        list format is for urwid, which calls this a "palette"
+    """
+
+    DEFAULT_THEME = {
+        'time': 'dark red, default',
+        'log': 'dark blue, default',
+        'incoming': 'dark blue, default',
+        'outgoing': 'dark green, default',
+        'titlebar': 'black, dark blue',
+        'divider': 'black, dark blue'
+    }
+
+    FOREGROUND_INDICE = 0
+    BACKGROUND_INDICE = 1
+    ATTR_SET_LEN = 2
+
+    @staticmethod
+    def dict_to_list_format(dict_theme):
+        """"""
+        """"
+        return [(attr_name, split[ThemeFormatter.FOREGROUND_INDICE], colors[ThemeFormatter.BACKGROUND_INDICE])
+                for attr_name, colors_str in dict_theme.items()]
+        """
+
+        list_theme = []
+        for attr_name, colors_str in dict_theme.items():
+            colors = [color_str.strip() for color_str in colors_str.split(',')]
+            if len(colors) == ThemeFormatter.ATTR_SET_LEN:
+                list_theme.append(
+                    (attr_name, colors[ThemeFormatter.FOREGROUND_INDICE], colors[ThemeFormatter.BACKGROUND_INDICE])
+                )
+            else:
+                return None
+
+        return list_theme
+
+
+class ConfigHandler(object):
+    # config parser format
+
+    CONFIG_DIR_NAME = 'smscli'
+    CONFIG_DIR_PATH = os.path.expanduser('~') + '/' '.config/' + CONFIG_DIR_NAME + '/'
+
+    CONFIG_FILE_NAME = 'smscli.conf'
+    CONFIG_FILE_PATH = CONFIG_DIR_PATH + CONFIG_FILE_NAME
+
+    SECTION_THEME = 'Theme'
+
+    def init_config(self):
+        self.config = configparser.ConfigParser()
+
+        # check if file exists - create if no and write defaults
+        if not os.path.isfile(ConfigHandler.CONFIG_FILE_PATH):
+            if not os.path.isdir(ConfigHandler.CONFIG_DIR_PATH):
+                try:
+                    os.makedirs(ConfigHandler.CONFIG_DIR_PATH)
+                except OSError as e:
+                    print('Failed to create config: ' + str(e))
+                    return False
+            self.create_config()
+
+        try:
+            self.config.read(ConfigHandler.CONFIG_FILE_PATH)
+        except configparser.Error as e:
+            print('Failed to parse file: ' + str(e))
+
+        return True
+
+    def create_config(self):
+        self.set_defaults()
+
+        with open(ConfigHandler.CONFIG_FILE_PATH, 'w') as config_file:
+            self.config.write(config_file)
+
+    def set_defaults(self):
+        """ set the default values for the config object that will be written to initial config file """
+
+        self.config[ConfigHandler.SECTION_THEME] = ThemeFormatter.DEFAULT_THEME
+
+        # other default settings will go here
+
+    def get_theme(self):
+        if self.config.has_section(ConfigHandler.SECTION_THEME):
+            return ThemeFormatter.dict_to_list_format(self.config[ConfigHandler.SECTION_THEME])
 
 
 # TODO: make util class, find classes for these functions
@@ -580,28 +686,30 @@ def shutdown():
 
     raise urwid.ExitMainLoop
 
-
-# TODO: get this from a file
-palette = [
-    ('time', 'dark red', 'default'),
-    ('log', 'dark blue', 'default'),
-    ('incoming', 'dark blue', 'default'),
-    ('outgoing', 'dark green', 'default'),
-    ('titlebar', 'black', 'dark blue'),
-    ('divider', 'black', 'dark blue')
-]
-
-
 if __name__ == '__main__':
     command_handler = CommandHandler()
     connection_handler = ConnectionHandler()
+    config_handler = ConfigHandler()
+
+    if not config_handler.init_config():
+        print('Failed to load config file')
+        exit(-1)
+
+    theme = config_handler.get_theme()
+    if theme is None:
+        print('Config file syntax is incorrect')
+        exit(-1)
 
     log_view = LogView([])
+    log_view.print_message('Welcome to smscli')
+
     main_window = MainWindow(log_view)
 
     signal.signal(signal.SIGINT, ctrlc_quit)
 
-    log_view.print_message('Welcome to smscli')
+    try:
+        main_loop = urwid.MainLoop(main_window, theme, handle_mouse=False, unhandled_input=handle_input)
+        main_loop.run()
+    except urwid.AttrSpecError as e:
+        print('Failed to initialize window: ' + str(e))
 
-    main_loop = urwid.MainLoop(main_window, palette, handle_mouse=False, unhandled_input=handle_input)
-    main_loop.run()
