@@ -19,7 +19,6 @@ gi.require_version('Notify', '0.7')
 from gi.repository import Notify
 
 
-VIEW_SWITCH_KEY = 'meta'    # meta/alt key used as prefix for switching views
 MAX_MESSAGE_LEN = 300
 
 # Main data structure, all contacts and conversations with each are stored here
@@ -179,7 +178,7 @@ class MainWindow(urwid.Frame):
         """
         self.shown_views = collections.OrderedDict({init_view.view_id: init_view})    # subset of views being shown
         self.max_views = MainWindow.MAX_VIEWS
-        self.current_view = init_view
+        self.current_view = init_view.view_id
 
     def add_new_view(self, view):
         if len(self.shown_views) <= self.max_views:
@@ -191,15 +190,25 @@ class MainWindow(urwid.Frame):
 
     def switch_view(self, view_id):
         """
-            change views, as in switch the current listbox
-            in the frame with a different one
+            change views, as in switch the current listbox in the frame with a different one
             contents['body'][0] -> inner frame
             contents['body'][0].contents['body'] -> (listbox, attr)
         """
 
         self.contents['body'][0].contents['body'] = (self.shown_views[view_id].listbox, None)
-        self.current_view = self.shown_views[view_id]
+        self.current_view = view_id
         self.refresh_divider()
+
+    def close_view(self, view_id):
+
+        if not list(self.shown_views.values())[0] == self.shown_views[view_id]:  # can never close first view (log view)
+            # shift current view down, delete old current view then switch
+            keys = list(self.shown_views.keys())
+            new_shown = keys[keys.index(view_id) - 1]
+
+            del(self.shown_views[view_id])
+            self.switch_view(new_shown)
+
 
     def get_input(self):
         return self.input_line.get_edit_text()
@@ -222,7 +231,7 @@ class MainWindow(urwid.Frame):
 
         # do it this way so we can get indices
         for i, keypair in enumerate(self.shown_views.items()):
-            if keypair[1] is self.current_view:
+            if keypair[0] == self.current_view:
                 divider_text += ' -' + str(i) + ':' + keypair[1].view_name + '-'
             else:
                 divider_text += ' [' + str(i) + ':' + keypair[1].view_name + ']'
@@ -354,7 +363,12 @@ class ConnectionHandler(object):
         view_message = JSONHelper.json_to_view_message(message)
 
         if view_message.related_view_id not in contact_views:
-            add_new_contact(view_message.related_view_id)
+            contact_views[view_message.related_view_id] = ContactView(
+                view_message.related_view_id,
+                view_message.related_view_id,
+                view_message.related_view_id,
+                []
+            )
 
         contact_view = contact_views[view_message.related_view_id]
         contact_view.add_message(view_message)
@@ -382,7 +396,7 @@ class ConnectionHandler(object):
             messages = [message]
 
         view_messages = [ViewMessage(datetime.datetime.now().time().strftime('%H:%M:%S'), message,
-                                     main_window.current_view.view_id, 'Me', ViewMessage.OUTGOING_SENDER)
+                                     main_window.current_view, 'Me', ViewMessage.OUTGOING_SENDER)
                          for message in messages]
 
         main_window.current_view.add_messages(view_messages)
@@ -672,43 +686,61 @@ class ConfigHandler(object):
 class InputHandler(object):
     """ handles and delegates any kind of input from the user """
 
+    VIEW_KEY = 'meta'    # meta/alt key used as prefix for switching views
+    VIEW_COMBO_LEN = 2
+    VIEW_CLOSE_KEY = 'c'
+
+    def __init__(self):
+        self.history = []       # maintain a history list, could load and write this to a file
+
     def handle_input(self, key):
         """ callback method called by urwid """
 
         if key == 'enter':
             user_input = main_window.get_input()
-            if len(user_input) and user_input[0] == CommandHandler.COMMAND_PREFIX:
-                command_handler.parse_command(user_input)
-                main_window.clear_input()
-            elif connection_handler.connected and (main_window.current_view != log_view):
-                connection_handler.send_message(user_input)
-        elif VIEW_SWITCH_KEY in key:
-            self.handle_view_switch(key)
+            if len(user_input):
+                # decide if a message or a command
+                if user_input[0] == CommandHandler.COMMAND_PREFIX:
+                    command_handler.parse_command(user_input)
+                    main_window.clear_input()
+                elif connection_handler.connected and (main_window.shown_views[main_window.current_view] != log_view):
+                    connection_handler.send_message(user_input)
+        elif InputHandler.VIEW_KEY in key:
+            self.handle_view_input(key)
 
-    def handle_view_switch(self, key):
+    def handle_view_input(self, key):
+        if len(key.split()) == InputHandler.VIEW_COMBO_LEN:
+            action = key.split()[1]
+        else:
+            return
+
+        if action == InputHandler.VIEW_CLOSE_KEY:
+            main_window.close_view(main_window.current_view)
+        else:   # switch view
+            self.handle_view_switch(action)
+
+    def handle_view_switch(self, view_index):
+        """ uses main window object to switch a view given a index """
+
         try:
-            view_index = int(key.split()[1])
-            view_id = list(main_window.shown_views.items())[view_index][0]
+            view_index = int(view_index)
+        except ValueError:
+            return
 
-            if view_index < len(main_window.shown_views) and \
-                            main_window.shown_views[view_id] != main_window.current_view:
+        if view_index < len(main_window.shown_views):
+            # convert view_index to a view_id, this works cause shown_views is a OrderedDict
+            view_id = list(main_window.shown_views.keys())[view_index]
+
+            if main_window.shown_views[view_id] != main_window.current_view:
                 main_window.switch_view(view_id)
-        except:
-            pass
 
     def ctrl_c_quit(signum, frame):
-        """ trap ctrl-c """
+        """ static method to trap ctrl-c """
         shutdown()
 
 
 """
 def add_new_contact(contact_id):
-    contact_views[contact_id] = ContactView(
-            contact_id,
-            contact_id,
-            contact_id,
-            []
-    )
 """
 
 def shutdown():
@@ -721,11 +753,14 @@ def shutdown():
     raise urwid.ExitMainLoop
 
 if __name__ == '__main__':
+    # TODO: implement command line options too, like config file specification and help
+
     """ wow someones original """
     command_handler = CommandHandler()
     connection_handler = ConnectionHandler()
     config_handler = ConfigHandler()
     input_handler = InputHandler()
+
 
     if not config_handler.init_config():
         print('Failed to load config file')
