@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 import struct
 import signal
 import socket
@@ -265,6 +266,15 @@ class ConnectionHandler(object):
 
     LEN_BYTE_SIZE = 4               # byte size of message length
     LEN_STRUCT_FORMAT = '! i'       # format chars for struct holding message length
+    TIMEOUT = 15
+
+    MIN_PORT = 1
+    MAX_PORT = 65535
+
+    ERROR_MESSAGE_TIMEOUT = 'Connection timed out'
+    ERROR_MESSAGE_REFUSED = 'Connection was refused'
+    ERROR_MESSAGE_INVALID = 'Invalid command argument'
+    ERROR_MESSAGE_GENERIC = 'Connection failed'
 
     def __init__(self):
         self.connected = False
@@ -274,8 +284,6 @@ class ConnectionHandler(object):
             connects to server, reads initial data
             starts up read loop thread
         """
-
-        # TODO: error handling
 
         self.connect(ip_address, port)
 
@@ -294,16 +302,33 @@ class ConnectionHandler(object):
             log_view.print_message('Connected to ' + str(self.ip_address) + ' on port: ' + str(self.port))
 
     def connect(self, ip_address, port):
-        try:
-            self.ip_address = socket.inet_aton(ip_address)
+        if ConnectionHandler.is_valid_ipv4_address(ip_address) and ConnectionHandler.is_valid_port(port):
+            self.ip_address = ip_address
             self.port = port
 
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((ip_address, int(port)))
+            try:
 
-            self.connected = True
-        except socket.error as e:
-            log_view.print_message(str(e))
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.settimeout(ConnectionHandler.TIMEOUT)
+
+                self.socket.connect((ip_address, int(port)))
+                self.connected = True
+
+                self.socket.settimeout(socket.getdefaulttimeout())
+            except socket.error as e:
+                if e.errno == socket.errno.ETIMEDOUT:
+                    error_message = ConnectionHandler.ERROR_MESSAGE_TIMEOUT
+                elif e.errno == socket.errno.ECONNREFUSED:
+                    error_message = ConnectionHandler.ERROR_MESSAGE_REFUSED
+                else:
+                    # error_message = ConnectionHandler.ERROR_MESSAGE_GENERIC
+                    # error_message = str(e)
+                    raise
+
+                log_view.print_message(error_message)
+                self.connected = False
+        else:
+            log_view.print_message(ConnectionHandler.ERROR_MESSAGE_INVALID)
             self.connected = False
 
     def read_server(self):
@@ -399,13 +424,33 @@ class ConnectionHandler(object):
                                      main_window.current_view, 'Me', ViewMessage.OUTGOING_SENDER)
                          for message in messages]
 
-        main_window.current_view.add_messages(view_messages)
+        main_window.shown_views[main_window.current_view].add_messages(view_messages)
 
         for view_message in view_messages:
             connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
             time.sleep(0.2)
 
         main_window.clear_input()
+
+    def is_valid_ipv4_address(ip_address):
+        try:
+            socket.inet_aton(ip_address)
+        except socket.error:
+            return False
+
+        return ip_address.count('.') == 3
+
+    def is_valid_port(port):
+        try:
+            port = int(port)
+
+            if ConnectionHandler.MIN_PORT <= port <= ConnectionHandler.MAX_PORT:
+                return True
+            else:
+                return False
+        except:
+            raise       # todo: whats this ex called...
+            # return false
 
 
 class CommandHandler(object):
@@ -423,19 +468,24 @@ class CommandHandler(object):
 
     def parse_command(self, command):
         # break up command
-        command_parts = command[1:].split()
-        command_name = command_parts[0]
-        command_args = command_parts[1:]
-
-        # call method associated to command
-        command_method_str = CommandHandler.COMMAND_METHOD_PREFIX + command_name;
-
         try:
-            getattr(self, command_method_str)(command_args)
+            command_parts = command[1:].split()     # grab everything after the slash and split on space
+            command_name, command_args = command_parts[0], command_parts[1:]
+
+            # get method associated to command
+            command_method_str = CommandHandler.COMMAND_METHOD_PREFIX + command_name
+            command_method = getattr(self, command_method_str)
+        except IndexError:
+            # command was to short, something like /
+            self.do_help([])
+            return False
         except AttributeError:
             # command does not exist
             self.do_help([])
             return False
+        else:
+            # now call it, do this here so we don't catch attr errors inside command_method
+            command_method(command_args)
 
         return True
 
@@ -468,7 +518,6 @@ class CommandHandler(object):
 
             invalid phone numbers and such are left for the server to deal with
         """
-
         num_args = 1
 
         if connection_handler.connected:
@@ -481,16 +530,24 @@ class CommandHandler(object):
                         if view.view_id not in main_window.shown_views:
                             main_window.add_new_view(view)
                 else:
-                    contact_views[name] = ContactView(
-                        name,
-                        name,
-                        name,
-                        []
-                    )
+                    # unmatched contact, assume name is a phone number, first ensure it has no letters
+                    if re.search('[a-zA-Z]', name) is None:
+                        contact_views[name] = ContactView(
+                            name,
+                            name,
+                            name,
+                            []
+                        )
 
-                    contact_view = contact_views[name]
-                    main_window.add_new_view(contact_view)
-                    main_window.switch_view(contact_view.view_id)
+                        # strip space and special characters
+                        name.strip()
+                        re.sub('[^0-9]', '', name)
+
+                        contact_view = contact_views[name]
+                        main_window.add_new_view(contact_view)
+                        main_window.switch_view(contact_view.view_id)
+                    else:
+                        log_view.print_message('Invalid phone number or contact')
             else:
                 self.do_help(['msg'])
         else:
@@ -501,7 +558,7 @@ class CommandHandler(object):
         # TODO
 
     def do_quit(self, args):
-        exit()
+        exit()      # TODO: bugged out
 
     def do_help(self, args):
         if len(args) == 0:
@@ -677,11 +734,13 @@ class ConfigHandler(object):
             conn_set = [self.config[ConfigHandler.SECTION_ALIASES][name]
                         for name in self.config.options(ConfigHandler.SECTION_ALIASES)
                         if name == alias_name]
-
-            conn_set = [part.strip(',') for part in conn_set[0].split(',')]
-            conn_set[1] = int(conn_set[1])
-
-            return conn_set
+            try:
+                conn_set = [part.strip(',') for part in conn_set[0].split(',')]     # choose first matched alias
+                conn_set[1] = int(conn_set[1])
+            except IndexError:
+                return None
+            else:
+                return conn_set
         else:
             return None
 
@@ -712,7 +771,7 @@ class InputHandler(object):
                 # decide if a message or a command
                 if user_input[0] == CommandHandler.COMMAND_PREFIX:
                     if command_handler.parse_command(user_input):
-                        self.history.append(user_input.split()[0])
+                        self.history.append(user_input)
 
                     main_window.clear_input()
                 elif connection_handler.connected and (main_window.shown_views[main_window.current_view] != log_view):
@@ -756,10 +815,12 @@ class InputHandler(object):
             if (self.current_hist_item - 1) >= 0:
                 self.current_hist_item -= 1
                 main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+                main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
         elif hist_dir == InputHandler.HISTORY_FORWARD_KEY:
             if (self.current_hist_item + 1) < len(self.history):
                 self.current_hist_item += 1
                 main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+                main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
             elif (self.current_hist_item + 1) == len(self.history):
                 main_window.input_line.set_edit_text('')
                 self.current_hist_item += 1
@@ -768,10 +829,6 @@ class InputHandler(object):
         """ static method to trap ctrl-c """
         shutdown()
 
-
-"""
-def add_new_contact(contact_id):
-"""
 
 def shutdown():
     if connection_handler.connected:
