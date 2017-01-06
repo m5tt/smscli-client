@@ -435,6 +435,9 @@ class CommandHandler(object):
         except AttributeError:
             # command does not exist
             self.do_help([])
+            return False
+
+        return True
 
     def do_connect(self, args):
         """
@@ -690,21 +693,35 @@ class InputHandler(object):
     VIEW_COMBO_LEN = 2
     VIEW_CLOSE_KEY = 'c'
 
+    HISTORY_BACK_KEY = 'up'
+    HISTORY_FORWARD_KEY = 'down'
+
+    INPUT_LINE_KEY = 'enter'
+
     def __init__(self):
         self.history = []       # maintain a history list, could load and write this to a file
+        self.current_hist_item = len(self.history)
 
     def handle_input(self, key):
         """ callback method called by urwid """
 
-        if key == 'enter':
+        if key == InputHandler.INPUT_LINE_KEY:
             user_input = main_window.get_input()
+
             if len(user_input):
                 # decide if a message or a command
                 if user_input[0] == CommandHandler.COMMAND_PREFIX:
-                    command_handler.parse_command(user_input)
+                    if command_handler.parse_command(user_input):
+                        self.history.append(user_input.split()[0])
+
                     main_window.clear_input()
                 elif connection_handler.connected and (main_window.shown_views[main_window.current_view] != log_view):
                     connection_handler.send_message(user_input)
+
+            # reset current history item
+            self.current_hist_item = len(self.history)
+        elif key == InputHandler.HISTORY_BACK_KEY or key == InputHandler.HISTORY_FORWARD_KEY:
+            self.handle_history(key)
         elif InputHandler.VIEW_KEY in key:
             self.handle_view_input(key)
 
@@ -733,6 +750,19 @@ class InputHandler(object):
 
             if main_window.shown_views[view_id] != main_window.current_view:
                 main_window.switch_view(view_id)
+
+    def handle_history(self, hist_dir):
+        if hist_dir == InputHandler.HISTORY_BACK_KEY:
+            if (self.current_hist_item - 1) >= 0:
+                self.current_hist_item -= 1
+                main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+        elif hist_dir == InputHandler.HISTORY_FORWARD_KEY:
+            if (self.current_hist_item + 1) < len(self.history):
+                self.current_hist_item += 1
+                main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+            elif (self.current_hist_item + 1) == len(self.history):
+                main_window.input_line.set_edit_text('')
+                self.current_hist_item += 1
 
     def ctrl_c_quit(signum, frame):
         """ static method to trap ctrl-c """
