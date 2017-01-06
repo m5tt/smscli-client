@@ -228,7 +228,10 @@ class MainWindow(urwid.Frame):
             looks like: '[connected]    [0:contact_name1] [1:contact_name2]'
         """
 
-        divider_text = '[connected]' if connection_handler.connected else '[disconnected]'
+        if connection_handler.connected:
+            divider_text = '[{status}]'.format(status=ConnectionHandler.STATUS_CONNECTED)
+        else:
+            divider_text = '[{status}]'.format(status=ConnectionHandler.STATUS_DISCONNECTED)
 
         # do it this way so we can get indices
         for i, keypair in enumerate(self.shown_views.items()):
@@ -276,6 +279,12 @@ class ConnectionHandler(object):
     ERROR_MESSAGE_INVALID = 'Invalid command argument'
     ERROR_MESSAGE_GENERIC = 'Connection failed'
 
+    MESSAGE_CONNECTING = 'Connecting to {ip}...'
+    MESSAGE_ONCONNECT = 'Connected to {ip} on {port}'
+
+    STATUS_CONNECTED = 'connected'
+    STATUS_DISCONNECTED = 'disconnected'
+
     def __init__(self):
         self.connected = False
 
@@ -288,18 +297,20 @@ class ConnectionHandler(object):
         self.connect(ip_address, port)
 
         if self.connected:
-            main_window.refresh_divider()
+            log_view.print_message(ConnectionHandler.MESSAGE_CONNECTING.format(ip=self.ip_address))
+            main_loop.draw_screen()     # gets blocked by connection stuff otherwise
 
             initial_data = self.read_server()
-            JSONHelper.setup_contact_views(initial_data)
-
-            # ensure all views except log are closed so we don't have out of date views on reconnects
-            main_window.init_views(log_view)
+            JSONHelper.setup_contact_views(initial_data)        # TODO: have this return
 
             self.read_looper = threading.Thread(target=self.read_loop)
             self.read_looper.start()
 
-            log_view.print_message('Connected to ' + str(self.ip_address) + ' on port: ' + str(self.port))
+            # ensure all views except log are closed so we don't have out of date views on reconnects
+            main_window.init_views(log_view)
+            main_window.refresh_divider()
+
+            log_view.print_message(ConnectionHandler.MESSAGE_ONCONNECT.format(ip=self.ip_address, port=self.port))
 
     def connect(self, ip_address, port):
         if ConnectionHandler.is_valid_ipv4_address(ip_address) and ConnectionHandler.is_valid_port(port):
@@ -348,7 +359,7 @@ class ConnectionHandler(object):
             if message == '':
                 raise socket.error
         except socket.error:
-            log_view.print_message('Disconnected')
+            log_view.print_message(ConnectionHandler.STATUS_DISCONNECTED)
             self.connected = False
 
         return message
@@ -401,11 +412,10 @@ class ConnectionHandler(object):
         if view_message.related_view_id not in main_window.shown_views:
             main_window.add_new_view(contact_view)
 
-        if Notify.init(contact_view.display_name):
-            notification = Notify.Notification.new(contact_view.display_name, view_message.body)
-            notification.show()
+        if view_message.message_type == ViewMessage.INCOMING_SENDER:
+            self.notify(contact_view.display_name, view_message.body)
 
-        # were in another thread so we have to do this to tell urwid to render
+        # were in another thread so explicitly tell urwid to render
         main_loop.draw_screen()
 
     def send_message(self, message):
@@ -431,6 +441,11 @@ class ConnectionHandler(object):
             time.sleep(0.2)
 
         main_window.clear_input()
+
+    def notify(self, title, body):
+        if Notify.init(title):
+            notification = Notify.Notification.new(title, body)
+            notification.show()
 
     def is_valid_ipv4_address(ip_address):
         try:
@@ -484,7 +499,7 @@ class CommandHandler(object):
             self.do_help([])
             return False
         else:
-            # now call it, do this here so we don't catch attr errors inside command_method
+            # now call it, do this here so we don't catch other attr errors inside command_method
             command_method(command_args)
 
         return True
