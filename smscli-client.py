@@ -46,8 +46,7 @@ class ViewMessage(urwid.Padding):
     BODY_ATTR = 'body'
 
     def __init__(self, message_time, body, related_view_id, sender_name, message_type):
-        self.message_time = message_time
-
+        self.message_time = message_time        # expects properly formatted time
         self.body = body
         self.related_view_id = related_view_id
         self.sender_name = sender_name
@@ -72,10 +71,6 @@ class ViewMessage(urwid.Padding):
             align=self.alignment,
             width=(self.width_type, self.width_size)
         )
-
-    @staticmethod
-    def format_time(message_time):
-        return time.strftime(message_time, ViewMessage.TIME_FORMAT_STR)
 
 
 class View(object):
@@ -119,7 +114,7 @@ class LogView(View):
 
     def print_message(self, message):
         self.add_message(ViewMessage(
-            datetime.datetime.now().time().strftime('%H:%M:%S'),
+            datetime.datetime.now().time().strftime(ViewMessage.TIME_FORMAT_STR),
             message,
             LogView.VIEW_NAME,
             LogView.VIEW_NAME,
@@ -160,11 +155,12 @@ class MainWindow(urwid.Frame):
 
     TITLE_BAR_ATTR = 'titlebar'
     TITLE_BAR_TEXT = 'smscli'
-
     DIVIDER_ATTR = 'divider'
+    FOCUS_ATTR = 'footer'
 
     EDIT_CAPTION = '> '
-    MAX_VIEWS = 6
+    MAX_VIEWS = 6                    # TODO: deal with this properly
+    ERROR_MAX_VIEWS = 'Cant open anymore views'
 
     def __init__(self, init_view):
         self.init_views(init_view)
@@ -183,7 +179,7 @@ class MainWindow(urwid.Frame):
 
         super().__init__(inner_frame, footer=self.input_line)
 
-        self.set_focus('footer')
+        self.set_focus(MainWindow.FOCUS_ATTR)
 
     def init_views(self, init_view):
         """
@@ -200,7 +196,7 @@ class MainWindow(urwid.Frame):
 
             self.refresh_divider()
         else:
-            log_view.print_message('Maxed out views')
+            log_view.print_message(MainWindow.ERROR_MAX_VIEWS)
 
     def switch_view(self, view_id):
         """
@@ -281,10 +277,13 @@ class ConnectionHandler(object):
 
     LEN_BYTE_SIZE = 4               # byte size of message length
     LEN_STRUCT_FORMAT = '! i'       # format chars for struct holding message length
+    LEN_STRUCT_INT_TYPE = 'big'
     TIMEOUT = 15
 
     MIN_PORT = 1
     MAX_PORT = 65535
+
+    WRITE_PAUSE_TIME = 0.2
 
     ERROR_MESSAGE_TIMEOUT = 'Connection timed out'
     ERROR_MESSAGE_REFUSED = 'Connection was refused'
@@ -363,13 +362,13 @@ class ConnectionHandler(object):
         try:
             length = int.from_bytes(
                 self.socket.recv(self.LEN_BYTE_SIZE, socket.MSG_WAITALL),
-                'big'
+                ConnectionHandler.LEN_STRUCT_INT_TYPE
             )
 
             message = str(self.socket.recv(length, socket.MSG_WAITALL), 'utf-8')
 
-            # clean disconnect will not raise socket.error, so do it ourselves
-            if message == '':
+            # clean disconnect will not raise socket.error but will return empty message
+            if not message:
                 raise socket.error
         except socket.error:
             log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
@@ -397,7 +396,7 @@ class ConnectionHandler(object):
 
         while self.connected:
             json_message = self.read_server()
-            if json_message != '':
+            if json_message:
                 self.receive_message(json_message)
 
         # if this is a shutdown, urwid raises an assertion error when we do this
@@ -452,7 +451,7 @@ class ConnectionHandler(object):
         # write each chunk to server
         for view_message in view_message_chunk:
             self.write_server(JSONHelper.view_message_to_json(view_message))
-            time.sleep(0.2)
+            time.sleep(ConnectionHandler.WRITE_PAUSE_TIME)
 
         # finally add them to the current view
         main_window.shown_views[main_window.current_view].add_messages(view_message_chunk)
@@ -495,13 +494,15 @@ class CommandHandler(object):
     COMMAND_PREFIX = '/'        # all commands start with /
     COMMAND_METHOD_PREFIX = 'do_'
     HELP_MESSAGE_PREFIX = 'help_'
-    DEFAULT_HELP_MESSAGE = 'Usage: /<command> <args>'   # TODO: make this longer
+    DEFAULT_HELP_MESSAGE = 'Usage: /<command> <args>'
 
     # help messages
     HELP_CONNECT = 'Usage: /connect <ip> <port>'
     HELP_MSG = 'Usage: /msg <contact_name/phone_number>'
+    HELP_DISCONNECT = 'Usage: /disconnect'
+    HELP_LIST = 'Usage: /list'
 
-    # command specific strings
+    # command specific constants
 
     # connect command
     CONNECT_COMMAND_NAME = 'connect'
@@ -511,6 +512,10 @@ class CommandHandler(object):
     MSG_COMMAND_NAME = 'msg'
     MSG_DISCONNECTED = 'Not connected'
     MSG_INVALID_CONTACT = 'Invalid phone number or contact doesnt exist'
+
+    # list command
+    LIST_COMMAND_LIST_TITLE = 'Commands:'
+    LIST_COMMAND_LIST_INDENT = 2
 
     def parse_command(self, command):
         # break up command
@@ -600,11 +605,18 @@ class CommandHandler(object):
             log_view.print_message(CommandHandler.MSG_DISCONNECTED)
 
     def do_disconnect(self, args):
-        pass
-        # TODO
+        if connection_handler.connected:
+            connection_handler.connected = False
+            connection_handler.socket.shutdown(socket.SHUT_RDWR)
+            connection_handler.socket.close()
 
     def do_quit(self, args):
         exit()      # TODO: bugged out for some reason
+
+    def do_list(self, args):
+        log_view.print_message(CommandHandler.LIST_COMMAND_LIST_TITLE)
+        for command in CommandHandler.get_commands():
+            log_view.print_message(' ' * CommandHandler.LIST_COMMAND_LIST_INDENT + command)
 
     def do_help(self, args):
         if len(args) == 0:
@@ -612,6 +624,13 @@ class CommandHandler(object):
         else:
             help_message = (CommandHandler.HELP_MESSAGE_PREFIX + args[0]).upper()
             log_view.print_message(getattr(CommandHandler, help_message))
+
+    @staticmethod
+    def get_commands():
+        pattern = r'^' + re.escape(CommandHandler.COMMAND_METHOD_PREFIX) + r'.*'
+        return [method.split('_')[1]
+                for method in dir(CommandHandler)
+                if callable(getattr(CommandHandler, method)) and re.search(pattern, method, re.IGNORECASE)]
 
 
 class JSONHelper(object):
@@ -735,7 +754,9 @@ class ThemeFormatter(object):
 
 
 class ConfigHandler(object):
-    # config parser format
+    """ Deals with all things config file related"""
+
+    # TODO: needs way more testing
 
     USER_CONFIG_DIR = '.config'
     CONFIG_DIR_NAME = 'smscli'
@@ -747,6 +768,9 @@ class ConfigHandler(object):
     SECTION_THEME = 'Theme'
     SECTION_ALIASES = 'Aliases'
 
+    ERROR_CREATE = 'Failed to create config file'
+    ERROR_PARSE = 'Failed to parse config file'
+
     def init_config(self):
         self.config = configparser.ConfigParser()
 
@@ -756,14 +780,15 @@ class ConfigHandler(object):
                 try:
                     os.makedirs(ConfigHandler.CONFIG_DIR_PATH)
                 except OSError as e:
-                    print('Failed to create config: ' + str(e))
+                    print(ConfigHandler.ERROR_CREATE + str(e))
                     return False
             self.create_config()
 
         try:
             self.config.read(ConfigHandler.CONFIG_FILE_PATH)
         except configparser.Error as e:
-            print('Failed to parse file: ' + str(e))
+            print(ConfigHandler.ERROR_PARSE + str(e))
+            return False
 
         return True
 
@@ -880,8 +905,9 @@ class InputHandler(object):
                 self.current_hist_item += 1
                 main_window.input_line.set_edit_text('')
 
+    @staticmethod
     def ctrl_c_quit(signum, frame):
-        """ static method to trap ctrl-c """
+        """ method to trap ctrl-c """
         shutdown()
 
 
@@ -897,7 +923,7 @@ def shutdown():
 if __name__ == '__main__':
     # TODO: implement command line options like config file specification and help
 
-    """ wow someones original """
+    # wow someones original
     command_handler = CommandHandler()
     connection_handler = ConnectionHandler()
     config_handler = ConfigHandler()
@@ -909,7 +935,7 @@ if __name__ == '__main__':
 
     theme = config_handler.get_theme()
     if theme is None:
-        print('Config file syntax is incorrect')
+        print('Config file syntax is invalid')
         exit(-1)
 
     log_view = LogView([])
