@@ -1,6 +1,7 @@
 #/usr/bin/python
 
 # TODO: make strings generic
+from builtins import AssertionError, str
 
 import json
 import os
@@ -15,58 +16,66 @@ import configparser
 import time
 
 import gi
-import urwid
 gi.require_version('Notify', '0.7')
 from gi.repository import Notify
+import urwid
 
 
 MAX_MESSAGE_LEN = 300
 
-# Main data structure, all contacts and conversations with each are stored here
+# Main data structure, all contacts and conversations are stored here
 contact_views = {}
 
 
 class ViewMessage(urwid.Padding):
     """ Represents a single message in a view """ 
 
-    LOG_SENDER = 0
-    OUTGOING_SENDER = 'OUTBOX'
-    INCOMING_SENDER = 'INBOX'
+    TYPE_LOG = 0
+    TYPE_OUTGOING = 'OUTBOX'
+    TYPE_INCOMING = 'INBOX'
 
-    LOG_SENDER_ATTR = 'log'
-    OUTGOING_SENDER_ATTR = 'outgoing'
-    INCOMING_SENDER_ATTR = 'incoming'
+    TIME_FORMAT_STR = '%H:%M:%S'
+    USER_DISPLAY_NAME = 'Me'
 
-    TIME_ATTR = 'time'
+    # attributes for theming
+    TYPE_LOG_ATTR = 'log'
+    TYPE_OUTGOING_ATTR = 'outgoing'
+    TYPE_INCOMING_ATTR = 'incoming'
+
+    TIME_ATTR = 'message_time'
     BODY_ATTR = 'body'
 
-    def __init__(self, time, body, related_view_id, sender_name, message_type):
-        self.time = time
+    def __init__(self, message_time, body, related_view_id, sender_name, message_type):
+        self.message_time = message_time
+
         self.body = body
         self.related_view_id = related_view_id
         self.sender_name = sender_name
         self.message_type = message_type
 
-        self.alignment = 'left'
-        self.width_type = 'relative'
-        self.width_size = 70
+        self.alignment = MainWindow.MESSAGE_ALIGNMENT
+        self.width_type = MainWindow.MESSAGE_WIDTH_TYPE
+        self.width_size = MainWindow.MESSAGE_WIDTH_PERCENT
 
-        self.sender_attr = ''
-        if self.message_type == ViewMessage.LOG_SENDER:
-            self.sender_attr = ViewMessage.LOG_SENDER_ATTR
-        elif self.message_type == ViewMessage.OUTGOING_SENDER:
-            self.sender_attr = ViewMessage.OUTGOING_SENDER_ATTR
-        elif self.message_type == ViewMessage.INCOMING_SENDER:
-            self.sender_attr = ViewMessage.INCOMING_SENDER_ATTR
+        if self.message_type == ViewMessage.TYPE_LOG:
+            self.sender_attr = ViewMessage.TYPE_LOG_ATTR
+        elif self.message_type == ViewMessage.TYPE_OUTGOING:
+            self.sender_attr = ViewMessage.TYPE_OUTGOING_ATTR
+        elif self.message_type == ViewMessage.TYPE_INCOMING:
+            self.sender_attr = ViewMessage.TYPE_INCOMING_ATTR
 
         super().__init__(urwid.Text([
-                (ViewMessage.TIME_ATTR, self.time + ' - '),
+                (ViewMessage.TIME_ATTR, self.message_time + ' - '),
                 (self.sender_attr, self.sender_name + ': '),
                 (ViewMessage.BODY_ATTR, self.body)
             ]),
             align=self.alignment,
             width=(self.width_type, self.width_size)
         )
+
+    @staticmethod
+    def format_time(message_time):
+        return time.strftime(message_time, ViewMessage.TIME_FORMAT_STR)
 
 
 class View(object):
@@ -114,7 +123,7 @@ class LogView(View):
             message,
             LogView.VIEW_NAME,
             LogView.VIEW_NAME,
-            ViewMessage.LOG_SENDER
+            ViewMessage.TYPE_LOG
         ))
 
 
@@ -144,6 +153,10 @@ class MainWindow(urwid.Frame):
 
         key events will be handled externally
     """
+
+    MESSAGE_ALIGNMENT = 'left'
+    MESSAGE_WIDTH_TYPE = 'relative'
+    MESSAGE_WIDTH_PERCENT = 80        # how much of the screen a message takes up before wrapping
 
     TITLE_BAR_ATTR = 'titlebar'
     TITLE_BAR_TEXT = 'smscli'
@@ -210,7 +223,6 @@ class MainWindow(urwid.Frame):
             del(self.shown_views[view_id])
             self.switch_view(new_shown)
 
-
     def get_input(self):
         return self.input_line.get_edit_text()
 
@@ -252,7 +264,7 @@ class ConnectionHandler(object):
             messages are JSON strings
 
             messages can be sent either to or from
-            server/client at any time
+            server/client at any message_time
 
             initial data: large contact list with sms conversations
                           encapsulated
@@ -278,6 +290,7 @@ class ConnectionHandler(object):
     ERROR_MESSAGE_REFUSED = 'Connection was refused'
     ERROR_MESSAGE_INVALID = 'Invalid command argument'
     ERROR_MESSAGE_GENERIC = 'Connection failed'
+    ERROR_LOST_CONNECTION = 'Lost connection'
 
     MESSAGE_CONNECTING = 'Connecting to {ip}...'
     MESSAGE_ONCONNECT = 'Connected to {ip} on {port}'
@@ -359,7 +372,7 @@ class ConnectionHandler(object):
             if message == '':
                 raise socket.error
         except socket.error:
-            log_view.print_message(ConnectionHandler.STATUS_DISCONNECTED)
+            log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
             self.connected = False
 
         return message
@@ -375,8 +388,8 @@ class ConnectionHandler(object):
         try: 
             self.socket.sendall(struct.pack(ConnectionHandler.LEN_STRUCT_FORMAT, len(message)))
             self.socket.sendall(message.encode('utf-8'))
-        except socket.error as e:
-            log_view.print_message('Lost connection: ' + str(e))
+        except socket.error:
+            log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
             self.connected = False
 
     def read_loop(self):
@@ -398,6 +411,7 @@ class ConnectionHandler(object):
 
         view_message = JSONHelper.json_to_view_message(message)
 
+        # make new contact if contact not known
         if view_message.related_view_id not in contact_views:
             contact_views[view_message.related_view_id] = ContactView(
                 view_message.related_view_id,
@@ -412,49 +426,56 @@ class ConnectionHandler(object):
         if view_message.related_view_id not in main_window.shown_views:
             main_window.add_new_view(contact_view)
 
-        if view_message.message_type == ViewMessage.INCOMING_SENDER:
-            self.notify(contact_view.display_name, view_message.body)
+        if view_message.message_type == ViewMessage.TYPE_INCOMING:
+            ConnectionHandler.notify(contact_view.display_name, view_message.body)
 
         # were in another thread so explicitly tell urwid to render
         main_loop.draw_screen()
 
     def send_message(self, message):
         """
-            create a ViewMessage given message  body and current view
-            then send and add to view
+            create a ViewMessage given message  body and current view then send and add to view
         """
 
         if len(message) > MAX_MESSAGE_LEN:
-            # break messages into MAX_MESSAGE_LEN chunks
-            messages = [message[i:i+MAX_MESSAGE_LEN] for i in range(0, len(message), MAX_MESSAGE_LEN)]
+            # break message into MAX_MESSAGE_LEN chunks
+            message_chunk = [message[i:i+MAX_MESSAGE_LEN] for i in range(0, len(message), MAX_MESSAGE_LEN)]
         else:
-            messages = [message]
+            message_chunk = [message]
 
-        view_messages = [ViewMessage(datetime.datetime.now().time().strftime('%H:%M:%S'), message,
-                                     main_window.current_view, 'Me', ViewMessage.OUTGOING_SENDER)
-                         for message in messages]
+        # convert each message string chunk into a view message
+        view_message_chunk = [ViewMessage(datetime.datetime.now().time().strftime(ViewMessage.TIME_FORMAT_STR),
+                                          message, main_window.current_view, ViewMessage.USER_DISPLAY_NAME,
+                                          ViewMessage.TYPE_OUTGOING)
+                              for message in message_chunk]
 
-        main_window.shown_views[main_window.current_view].add_messages(view_messages)
-
-        for view_message in view_messages:
-            connection_handler.write_server(JSONHelper.view_message_to_json(view_message))
+        # write each chunk to server
+        for view_message in view_message_chunk:
+            self.write_server(JSONHelper.view_message_to_json(view_message))
             time.sleep(0.2)
 
+        # finally add them to the current view
+        main_window.shown_views[main_window.current_view].add_messages(view_message_chunk)
         main_window.clear_input()
 
-    def notify(self, title, body):
+    @staticmethod
+    def notify(title, body):
+        # TODO: make this optional
         if Notify.init(title):
             notification = Notify.Notification.new(title, body)
             notification.show()
 
+    @staticmethod
     def is_valid_ipv4_address(ip_address):
         try:
             socket.inet_aton(ip_address)
         except socket.error:
             return False
 
+        # though this is not technically needed for a valid ip we will impose it anyway
         return ip_address.count('.') == 3
 
+    @staticmethod
     def is_valid_port(port):
         try:
             port = int(port)
@@ -463,9 +484,8 @@ class ConnectionHandler(object):
                 return True
             else:
                 return False
-        except:
-            raise       # todo: whats this ex called...
-            # return false
+        except ValueError:
+            return False
 
 
 class CommandHandler(object):
@@ -478,8 +498,19 @@ class CommandHandler(object):
     DEFAULT_HELP_MESSAGE = 'Usage: /<command> <args>'   # TODO: make this longer
 
     # help messages
-    help_connect = 'Usage: /connect <ip> <port>'
-    help_msg = 'Usage: /msg <contact_name/phone_number>'
+    HELP_CONNECT = 'Usage: /connect <ip> <port>'
+    HELP_MSG = 'Usage: /msg <contact_name/phone_number>'
+
+    # command specific strings
+
+    # connect command
+    CONNECT_COMMAND_NAME = 'connect'
+    CONNECT_CONNECTION_EXIST = 'Already connected'
+
+    # msg command
+    MSG_COMMAND_NAME = 'msg'
+    MSG_DISCONNECTED = 'Not connected'
+    MSG_INVALID_CONTACT = 'Invalid phone number or contact doesnt exist'
 
     def parse_command(self, command):
         # break up command
@@ -520,11 +551,11 @@ class CommandHandler(object):
                 if conn_set is not None and len(conn_set) == 2:
                     connection_handler.setup_connection(conn_set[0], conn_set[1])
                 else:
-                    self.do_help(['connect'])
+                    self.do_help([CommandHandler.CONNECT_COMMAND_NAME])
             else:
-                self.do_help(['connect'])
+                self.do_help([CommandHandler.CONNECT_COMMAND_NAME])
         else:
-            log_view.print_message("Already connected")
+            log_view.print_message(CommandHandler.CONNECT_CONNECTION_EXIST)
 
     def do_msg(self, args):
         """
@@ -562,43 +593,55 @@ class CommandHandler(object):
                         main_window.add_new_view(contact_view)
                         main_window.switch_view(contact_view.view_id)
                     else:
-                        log_view.print_message('Invalid phone number or contact')
+                        log_view.print_message(CommandHandler.MSG_INVALID_CONTACT)
             else:
-                self.do_help(['msg'])
+                self.do_help([CommandHandler.MSG_COMMAND_NAME])
         else:
-            log_view.print_message("Not connected")
+            log_view.print_message(CommandHandler.MSG_DISCONNECTED)
 
     def do_disconnect(self, args):
         pass
         # TODO
 
     def do_quit(self, args):
-        exit()      # TODO: bugged out
+        exit()      # TODO: bugged out for some reason
 
     def do_help(self, args):
         if len(args) == 0:
-            log_view.print_message("Unknown command")
             log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE)
         else:
-            help_message = CommandHandler.HELP_MESSAGE_PREFIX + args[0]
+            help_message = (CommandHandler.HELP_MESSAGE_PREFIX + args[0]).upper()
             log_view.print_message(getattr(CommandHandler, help_message))
 
 
 class JSONHelper(object):
-    """
-        Util methods for converting between
-        JSON strings and objects used here
+    """ Util methods for converting between JSON strings and objects used here """
 
-        Is aware of dict keys used in json
-    """
+    REMOTE_TIME_FORMAT_STR = '%I:%M:%S %p'
+
+    JSON_MESSAGE_TIME_KEY = 'time'
+    JSON_MESSAGE_BODY_KEY = 'body'
+    JSON_MESSAGE_ID_KEY = 'relatedContactId'
+    JSON_MESSAGE_TYPE_KEY = 'smsMessageType'
+
+    JSON_CONTACT_ID_KEY = 'id'
+    JSON_CONTACT_DISPLAY_KEY = 'displayName'
+    JSON_CONTACT_PHONE_KEY = 'phoneNumber'
+
+    @staticmethod
+    def format_time(remote_time):
+        """ java client formats time all weird out, fix it here """
+        return datetime.datetime\
+            .strptime(remote_time, JSONHelper.REMOTE_TIME_FORMAT_STR)\
+            .strftime(ViewMessage.TIME_FORMAT_STR)
 
     @staticmethod
     def view_message_to_json(view_message):
         view_message_dict = {
-                'time': view_message.time,
-                'body': view_message.body,
-                'relatedContactId': view_message.related_view_id,
-                'smsMessageType': view_message.message_type
+                JSONHelper.JSON_MESSAGE_TIME_KEY: view_message.message_time,
+                JSONHelper.JSON_MESSAGE_BODY_KEY: view_message.body,
+                JSONHelper.JSON_MESSAGE_ID_KEY: view_message.related_view_id,
+                JSONHelper.JSON_MESSAGE_TYPE_KEY: view_message.message_type
         }
 
         return json.dumps(view_message_dict)
@@ -607,22 +650,20 @@ class JSONHelper(object):
     def json_to_view_message(json_view_message):
         view_message_dict = json.loads(json_view_message)
 
-        if view_message_dict['smsMessageType'] == ViewMessage.OUTGOING_SENDER:
-            display_name = 'Me'
+        if view_message_dict[JSONHelper.JSON_MESSAGE_TYPE_KEY] == ViewMessage.TYPE_OUTGOING:
+            display_name = ViewMessage.USER_DISPLAY_NAME
         else:
-            if view_message_dict['relatedContactId'] in contact_views:
-                display_name = contact_views[view_message_dict['relatedContactId']].display_name
+            if view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY] in contact_views:
+                display_name = contact_views[view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY]].display_name
             else:
-                display_name = view_message_dict['relatedContactId']
-
-        time = datetime.datetime.strptime(view_message_dict['time'], '%H:%M:%S %p').strftime('%H:%M:%S')
+                display_name = view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY]
 
         return ViewMessage(
-                time,
-                view_message_dict['body'],
-                view_message_dict['relatedContactId'],
+                JSONHelper.format_time(view_message_dict[JSONHelper.JSON_MESSAGE_TIME_KEY]),
+                view_message_dict[JSONHelper.JSON_MESSAGE_BODY_KEY],
+                view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY],
                 display_name,
-                view_message_dict['smsMessageType']
+                view_message_dict[JSONHelper.JSON_MESSAGE_TYPE_KEY]
         )
 
     @staticmethod
@@ -630,9 +671,9 @@ class JSONHelper(object):
         """ Convert a contact view dict to a ContactView object """
 
         return ContactView(
-                contact_view_dict['id'],
-                contact_view_dict['displayName'],
-                contact_view_dict['phoneNumber'],
+                contact_view_dict[JSONHelper.JSON_CONTACT_ID_KEY],
+                contact_view_dict[JSONHelper.JSON_CONTACT_DISPLAY_KEY],
+                contact_view_dict[JSONHelper.JSON_CONTACT_PHONE_KEY],
                 []
         )
 
@@ -664,7 +705,7 @@ class ThemeFormatter(object):
     """
 
     DEFAULT_THEME = {
-        'time': 'dark red, default',
+        'message_time': 'dark red, default',
         'log': 'dark blue, default',
         'incoming': 'dark blue, default',
         'outgoing': 'dark green, default',
@@ -696,16 +737,15 @@ class ThemeFormatter(object):
 class ConfigHandler(object):
     # config parser format
 
+    USER_CONFIG_DIR = '.config'
     CONFIG_DIR_NAME = 'smscli'
-    CONFIG_DIR_PATH = os.path.expanduser('~') + '/' '.config/' + CONFIG_DIR_NAME + '/'
+    CONFIG_DIR_PATH = os.path.join(os.path.expanduser('~'), USER_CONFIG_DIR, CONFIG_DIR_NAME)
 
     CONFIG_FILE_NAME = 'smscli.conf'
-    CONFIG_FILE_PATH = CONFIG_DIR_PATH + CONFIG_FILE_NAME
+    CONFIG_FILE_PATH = os.path.join(CONFIG_DIR_PATH, CONFIG_FILE_NAME)
 
     SECTION_THEME = 'Theme'
     SECTION_ALIASES = 'Aliases'
-
-    # TODO: use os helpers, like join
 
     def init_config(self):
         self.config = configparser.ConfigParser()
@@ -763,9 +803,9 @@ class ConfigHandler(object):
 class InputHandler(object):
     """ handles and delegates any kind of input from the user """
 
-    VIEW_KEY = 'meta'    # meta/alt key used as prefix for switching views
-    VIEW_COMBO_LEN = 2
-    VIEW_CLOSE_KEY = 'c'
+    VIEW_KEY = 'meta'       # meta/alt key used as prefix for view commands
+    VIEW_COMBO_LEN = 2      # view commands will always be a combo of 2
+    VIEW_CLOSE_KEY = 'c'    # key to close the current view
 
     HISTORY_BACK_KEY = 'up'
     HISTORY_FORWARD_KEY = 'down'
@@ -773,11 +813,11 @@ class InputHandler(object):
     INPUT_LINE_KEY = 'enter'
 
     def __init__(self):
-        self.history = []       # maintain a history list, could load and write this to a file
+        self.history = []       # maintain a history list
         self.current_hist_item = len(self.history)
 
     def handle_input(self, key):
-        """ callback method called by urwid """
+        """ callback method called by urwid when any kind input happens """
 
         if key == InputHandler.INPUT_LINE_KEY:
             user_input = main_window.get_input()
@@ -797,9 +837,9 @@ class InputHandler(object):
         elif key == InputHandler.HISTORY_BACK_KEY or key == InputHandler.HISTORY_FORWARD_KEY:
             self.handle_history(key)
         elif InputHandler.VIEW_KEY in key:
-            self.handle_view_input(key)
+            self.handle_view_command(key)
 
-    def handle_view_input(self, key):
+    def handle_view_command(self, key):
         if len(key.split()) == InputHandler.VIEW_COMBO_LEN:
             action = key.split()[1]
         else:
@@ -837,8 +877,8 @@ class InputHandler(object):
                 main_window.input_line.set_edit_text(self.history[self.current_hist_item])
                 main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
             elif (self.current_hist_item + 1) == len(self.history):
-                main_window.input_line.set_edit_text('')
                 self.current_hist_item += 1
+                main_window.input_line.set_edit_text('')
 
     def ctrl_c_quit(signum, frame):
         """ static method to trap ctrl-c """
@@ -855,14 +895,13 @@ def shutdown():
     raise urwid.ExitMainLoop
 
 if __name__ == '__main__':
-    # TODO: implement command line options too, like config file specification and help
+    # TODO: implement command line options like config file specification and help
 
     """ wow someones original """
     command_handler = CommandHandler()
     connection_handler = ConnectionHandler()
     config_handler = ConfigHandler()
     input_handler = InputHandler()
-
 
     if not config_handler.init_config():
         print('Failed to load config file')
