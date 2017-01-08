@@ -1,6 +1,5 @@
 #/usr/bin/python
 
-# TODO: make strings generic
 from builtins import AssertionError, str
 
 import json
@@ -20,12 +19,7 @@ gi.require_version('Notify', '0.7')
 from gi.repository import Notify
 import urwid
 
-
 MAX_MESSAGE_LEN = 300
-
-# Main data structure, all contacts and conversations are stored here
-contact_views = {}
-
 
 class ViewMessage(urwid.Padding):
     """ Represents a single message in a view """ 
@@ -73,7 +67,7 @@ class ViewMessage(urwid.Padding):
         )
 
 
-class View(object):
+class View:
     """
         Represents a single View.
 
@@ -196,7 +190,7 @@ class MainWindow(urwid.Frame):
 
             self.refresh_divider()
         else:
-            log_view.print_message(MainWindow.ERROR_MAX_VIEWS)
+            state.log_view.print_message(MainWindow.ERROR_MAX_VIEWS)
 
     def switch_view(self, view_id):
         """
@@ -236,7 +230,7 @@ class MainWindow(urwid.Frame):
             looks like: '[connected]    [0:contact_name1] [1:contact_name2]'
         """
 
-        if connection_handler.connected:
+        if state.connection_handler.connected:
             divider_text = '[{status}]'.format(status=ConnectionHandler.STATUS_CONNECTED)
         else:
             divider_text = '[{status}]'.format(status=ConnectionHandler.STATUS_DISCONNECTED)
@@ -251,7 +245,7 @@ class MainWindow(urwid.Frame):
         return divider_text
 
 
-class ConnectionHandler(object):
+class ConnectionHandler:
     """
         Handles all connection with the server
 
@@ -309,8 +303,8 @@ class ConnectionHandler(object):
         self.connect(ip_address, port)
 
         if self.connected:
-            log_view.print_message(ConnectionHandler.MESSAGE_CONNECTING.format(ip=self.ip_address))
-            main_loop.draw_screen()     # gets blocked by connection stuff otherwise
+            state.log_view.print_message(ConnectionHandler.MESSAGE_CONNECTING.format(ip=self.ip_address))
+            state.main_loop.draw_screen()     # gets blocked by connection stuff otherwise
 
             initial_data = self.read_server()
             JSONHelper.setup_contact_views(initial_data)        # TODO: have this return
@@ -319,10 +313,10 @@ class ConnectionHandler(object):
             self.read_looper.start()
 
             # ensure all views except log are closed so we don't have out of date views on reconnects
-            main_window.init_views(log_view)
-            main_window.refresh_divider()
+            state.main_window.init_views(state.log_view)
+            state.main_window.refresh_divider()
 
-            log_view.print_message(ConnectionHandler.MESSAGE_ONCONNECT.format(ip=self.ip_address, port=self.port))
+            state.log_view.print_message(ConnectionHandler.MESSAGE_ONCONNECT.format(ip=self.ip_address, port=self.port))
 
     def connect(self, ip_address, port):
         if ConnectionHandler.is_valid_ipv4_address(ip_address) and ConnectionHandler.is_valid_port(port):
@@ -348,10 +342,10 @@ class ConnectionHandler(object):
                     # error_message = str(e)
                     raise
 
-                log_view.print_message(error_message)
+                state.log_view.print_message(error_message)
                 self.connected = False
         else:
-            log_view.print_message(ConnectionHandler.ERROR_MESSAGE_INVALID)
+            state.log_view.print_message(ConnectionHandler.ERROR_MESSAGE_INVALID)
             self.connected = False
 
     def read_server(self):
@@ -371,7 +365,7 @@ class ConnectionHandler(object):
             if not message:
                 raise socket.error
         except socket.error:
-            log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
+            state.log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
             self.connected = False
 
         return message
@@ -388,7 +382,7 @@ class ConnectionHandler(object):
             self.socket.sendall(struct.pack(ConnectionHandler.LEN_STRUCT_FORMAT, len(message)))
             self.socket.sendall(message.encode('utf-8'))
         except socket.error:
-            log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
+            state.log_view.print_message(ConnectionHandler.ERROR_LOST_CONNECTION)
             self.connected = False
 
     def read_loop(self):
@@ -401,8 +395,8 @@ class ConnectionHandler(object):
 
         # if this is a shutdown, urwid raises an assertion error when we do this
         try:
-            main_window.refresh_divider()
-            main_loop.draw_screen()
+            state.main_window.refresh_divider()
+            state.main_loop.draw_screen()
         except AssertionError:
             pass
 
@@ -411,25 +405,25 @@ class ConnectionHandler(object):
         view_message = JSONHelper.json_to_view_message(message)
 
         # make new contact if contact not known
-        if view_message.related_view_id not in contact_views:
-            contact_views[view_message.related_view_id] = ContactView(
+        if view_message.related_view_id not in state.contact_views:
+            state.contact_views[view_message.related_view_id] = ContactView(
                 view_message.related_view_id,
                 view_message.related_view_id,
                 view_message.related_view_id,
                 []
             )
 
-        contact_view = contact_views[view_message.related_view_id]
+        contact_view = state.contact_views[view_message.related_view_id]
         contact_view.add_message(view_message)
 
-        if view_message.related_view_id not in main_window.shown_views:
-            main_window.add_new_view(contact_view)
+        if view_message.related_view_id not in state.main_window.shown_views:
+            state.main_window.add_new_view(contact_view)
 
         if view_message.message_type == ViewMessage.TYPE_INCOMING:
             ConnectionHandler.notify(contact_view.display_name, view_message.body)
 
         # were in another thread so explicitly tell urwid to render
-        main_loop.draw_screen()
+        state.main_loop.draw_screen()
 
     def send_message(self, message):
         """
@@ -444,7 +438,7 @@ class ConnectionHandler(object):
 
         # convert each message string chunk into a view message
         view_message_chunk = [ViewMessage(datetime.datetime.now().time().strftime(ViewMessage.TIME_FORMAT_STR),
-                                          message, main_window.current_view, ViewMessage.USER_DISPLAY_NAME,
+                                          message, state.main_window.current_view, ViewMessage.USER_DISPLAY_NAME,
                                           ViewMessage.TYPE_OUTGOING)
                               for message in message_chunk]
 
@@ -454,8 +448,8 @@ class ConnectionHandler(object):
             time.sleep(ConnectionHandler.WRITE_PAUSE_TIME)
 
         # finally add them to the current view
-        main_window.shown_views[main_window.current_view].add_messages(view_message_chunk)
-        main_window.clear_input()
+        state.main_window.shown_views[state.main_window.current_view].add_messages(view_message_chunk)
+        state.main_window.clear_input()
 
     @staticmethod
     def notify(title, body):
@@ -487,7 +481,7 @@ class ConnectionHandler(object):
             return False
 
 
-class CommandHandler(object):
+class CommandHandler:
     """
         Parses and handles commands
     """
@@ -546,21 +540,21 @@ class CommandHandler(object):
             connects to a smscli-server on the given ip and port
         """
 
-        if not connection_handler.connected:
+        if not state.connection_handler.connected:
             if len(args) > 0:
                 if len(args) == 1:
-                    conn_set = config_handler.get_alias(args[0])
+                    conn_set = state.config_handler.get_alias(args[0])
                 else:
                     conn_set = args
 
                 if conn_set is not None and len(conn_set) == 2:
-                    connection_handler.setup_connection(conn_set[0], conn_set[1])
+                    state.connection_handler.setup_connection(conn_set[0], conn_set[1])
                 else:
                     self.do_help([CommandHandler.CONNECT_COMMAND_NAME])
             else:
                 self.do_help([CommandHandler.CONNECT_COMMAND_NAME])
         else:
-            log_view.print_message(CommandHandler.CONNECT_CONNECTION_EXIST)
+            state.log_view.print_message(CommandHandler.CONNECT_CONNECTION_EXIST)
 
     def do_msg(self, args):
         """
@@ -571,19 +565,19 @@ class CommandHandler(object):
         """
         num_args = 1
 
-        if connection_handler.connected:
+        if state.connection_handler.connected:
             if len(args) == num_args:
                 name = args[0]
-                matched_views = [view for view in contact_views.values() if view.display_name.lower() == name.lower()]
+                matched_views = [view for view in state.contact_views.values() if view.display_name.lower() == name.lower()]
 
                 if len(matched_views):
                     for view in matched_views:      # could be multiple contacts with same name -just open all
-                        if view.view_id not in main_window.shown_views:
-                            main_window.add_new_view(view)
+                        if view.view_id not in state.main_window.shown_views:
+                            state.main_window.add_new_view(view)
                 else:
                     # unmatched contact, assume name is a phone number, first ensure it has no letters
                     if re.search('[a-zA-Z]', name) is None:
-                        contact_views[name] = ContactView(
+                        state.contact_views[name] = ContactView(
                             name,
                             name,
                             name,
@@ -594,36 +588,36 @@ class CommandHandler(object):
                         name.strip()
                         re.sub('[^0-9]', '', name)
 
-                        contact_view = contact_views[name]
-                        main_window.add_new_view(contact_view)
-                        main_window.switch_view(contact_view.view_id)
+                        contact_view = state.contact_views[name]
+                        state.main_window.add_new_view(contact_view)
+                        state.main_window.switch_view(contact_view.view_id)
                     else:
-                        log_view.print_message(CommandHandler.MSG_INVALID_CONTACT)
+                        state.log_view.print_message(CommandHandler.MSG_INVALID_CONTACT)
             else:
                 self.do_help([CommandHandler.MSG_COMMAND_NAME])
         else:
-            log_view.print_message(CommandHandler.MSG_DISCONNECTED)
+            state.log_view.print_message(CommandHandler.MSG_DISCONNECTED)
 
     def do_disconnect(self, args):
-        if connection_handler.connected:
-            connection_handler.connected = False
-            connection_handler.socket.shutdown(socket.SHUT_RDWR)
-            connection_handler.socket.close()
+        if state.connection_handler.connected:
+            state.connection_handler.connected = False
+            state.connection_handler.socket.shutdown(socket.SHUT_RDWR)
+            state.connection_handler.socket.close()
 
     def do_quit(self, args):
         exit()      # TODO: bugged out for some reason
 
     def do_list(self, args):
-        log_view.print_message(CommandHandler.LIST_COMMAND_LIST_TITLE)
+        state.log_view.print_message(CommandHandler.LIST_COMMAND_LIST_TITLE)
         for command in CommandHandler.get_commands():
-            log_view.print_message(' ' * CommandHandler.LIST_COMMAND_LIST_INDENT + command)
+            state.log_view.print_message(' ' * CommandHandler.LIST_COMMAND_LIST_INDENT + command)
 
     def do_help(self, args):
         if len(args) == 0:
-            log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE)
+            state.log_view.print_message(CommandHandler.DEFAULT_HELP_MESSAGE)
         else:
             help_message = (CommandHandler.HELP_MESSAGE_PREFIX + args[0]).upper()
-            log_view.print_message(getattr(CommandHandler, help_message))
+            state.log_view.print_message(getattr(CommandHandler, help_message))
 
     @staticmethod
     def get_commands():
@@ -633,7 +627,7 @@ class CommandHandler(object):
                 if callable(getattr(CommandHandler, method)) and re.search(pattern, method, re.IGNORECASE)]
 
 
-class JSONHelper(object):
+class JSONHelper:
     """ Util methods for converting between JSON strings and objects used here """
 
     REMOTE_TIME_FORMAT_STR = '%I:%M:%S %p'
@@ -672,8 +666,8 @@ class JSONHelper(object):
         if view_message_dict[JSONHelper.JSON_MESSAGE_TYPE_KEY] == ViewMessage.TYPE_OUTGOING:
             display_name = ViewMessage.USER_DISPLAY_NAME
         else:
-            if view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY] in contact_views:
-                display_name = contact_views[view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY]].display_name
+            if view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY] in state.contact_views:
+                display_name = state.contact_views[view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY]].display_name
             else:
                 display_name = view_message_dict[JSONHelper.JSON_MESSAGE_ID_KEY]
 
@@ -703,10 +697,10 @@ class JSONHelper(object):
         contact_view_dicts = json.loads(json_contacts)
 
         for view_id, contact_view_dict in contact_view_dicts.items():
-            contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
+            state.contact_views[view_id] = JSONHelper.dict_to_contact_view(contact_view_dict)
 
 
-class ThemeFormatter(object):
+class ThemeFormatter:
     """
         small static class to handle theme
         stores default theme and has helpers
@@ -753,7 +747,7 @@ class ThemeFormatter(object):
         return list_theme
 
 
-class ConfigHandler(object):
+class ConfigHandler:
     """ Deals with all things config file related"""
 
     # TODO: needs way more testing
@@ -825,7 +819,7 @@ class ConfigHandler(object):
             return None
 
 
-class InputHandler(object):
+class InputHandler:
     """ handles and delegates any kind of input from the user """
 
     VIEW_KEY = 'meta'       # meta/alt key used as prefix for view commands
@@ -845,17 +839,17 @@ class InputHandler(object):
         """ callback method called by urwid when any kind input happens """
 
         if key == InputHandler.INPUT_LINE_KEY:
-            user_input = main_window.get_input()
+            user_input = state.main_window.get_input()
 
             if len(user_input):
                 # decide if a message or a command
                 if user_input[0] == CommandHandler.COMMAND_PREFIX:
-                    if command_handler.parse_command(user_input):
+                    if state.command_handler.parse_command(user_input):
                         self.history.append(user_input)
 
-                    main_window.clear_input()
-                elif connection_handler.connected and (main_window.shown_views[main_window.current_view] != log_view):
-                    connection_handler.send_message(user_input)
+                    state.main_window.clear_input()
+                elif state.connection_handler.connected and (state.main_window.shown_views[state.main_window.current_view] != state.log_view):
+                    state.connection_handler.send_message(user_input)
 
             # reset current history item
             self.current_hist_item = len(self.history)
@@ -871,7 +865,7 @@ class InputHandler(object):
             return
 
         if action == InputHandler.VIEW_CLOSE_KEY:
-            main_window.close_view(main_window.current_view)
+            state.main_window.close_view(state.main_window.current_view)
         else:   # switch view
             self.handle_view_switch(action)
 
@@ -883,27 +877,27 @@ class InputHandler(object):
         except ValueError:
             return
 
-        if view_index < len(main_window.shown_views):
+        if view_index < len(state.main_window.shown_views):
             # convert view_index to a view_id, this works cause shown_views is a OrderedDict
-            view_id = list(main_window.shown_views.keys())[view_index]
+            view_id = list(state.main_window.shown_views.keys())[view_index]
 
-            if main_window.shown_views[view_id] != main_window.current_view:
-                main_window.switch_view(view_id)
+            if state.main_window.shown_views[view_id] != state.main_window.current_view:
+                state.main_window.switch_view(view_id)
 
     def handle_history(self, hist_dir):
         if hist_dir == InputHandler.HISTORY_BACK_KEY:
             if (self.current_hist_item - 1) >= 0:
                 self.current_hist_item -= 1
-                main_window.input_line.set_edit_text(self.history[self.current_hist_item])
-                main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
+                state.main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+                state.main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
         elif hist_dir == InputHandler.HISTORY_FORWARD_KEY:
             if (self.current_hist_item + 1) < len(self.history):
                 self.current_hist_item += 1
-                main_window.input_line.set_edit_text(self.history[self.current_hist_item])
-                main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
+                state.main_window.input_line.set_edit_text(self.history[self.current_hist_item])
+                state.main_window.input_line.set_edit_pos(len(self.history[self.current_hist_item]))
             elif (self.current_hist_item + 1) == len(self.history):
                 self.current_hist_item += 1
-                main_window.input_line.set_edit_text('')
+                state.main_window.input_line.set_edit_text('')
 
     @staticmethod
     def ctrl_c_quit(signum, frame):
@@ -911,42 +905,61 @@ class InputHandler(object):
         shutdown()
 
 
+class State(object):
+    """ 
+        state class to hold instances of some objects
+        kind of shit but i dont know what else to do, maybe modules...
+    """
+
+    def __init__(self):
+        self.contact_views = {} # Main data structure, all contacts and conversations are stored here
+
+        self.command_handler = CommandHandler()
+        self.connection_handler = ConnectionHandler()
+        self.config_handler = ConfigHandler()
+
+
+
 def shutdown():
-    if connection_handler.connected:
+    if state.connection_handler.connected:
         # stop read looper thread
-        connection_handler.connected = False
-        connection_handler.socket.shutdown(socket.SHUT_RDWR)
-        connection_handler.socket.close()
+        state.connection_handler.connected = False
+        state.connection_handler.socket.shutdown(socket.SHUT_RDWR)
+        state.connection_handler.socket.close()
 
     raise urwid.ExitMainLoop
 
-if __name__ == '__main__':
+
+def main():
     # TODO: implement command line options like config file specification and help
+    # TODO: get rid of logview object, can do it through main_window
 
-    # wow someones original
-    command_handler = CommandHandler()
-    connection_handler = ConnectionHandler()
-    config_handler = ConfigHandler()
-    input_handler = InputHandler()
+    global state
 
-    if not config_handler.init_config():
+    state.log_view = LogView([])         
+    state.log_view.print_message('Welcome to smscli')
+
+    state.main_window = MainWindow(state.log_view)
+
+    if not state.config_handler.init_config():
         print('Failed to load config file')
         exit(-1)
 
-    theme = config_handler.get_theme()
+    theme = state.config_handler.get_theme()
     if theme is None:
         print('Config file syntax is invalid')
         exit(-1)
 
-    log_view = LogView([])
-    log_view.print_message('Welcome to smscli')
-
-    main_window = MainWindow(log_view)
-
     signal.signal(signal.SIGINT, InputHandler.ctrl_c_quit)
 
     try:
-        main_loop = urwid.MainLoop(main_window, theme, handle_mouse=False, unhandled_input=input_handler.handle_input)
-        main_loop.run()
+        state.main_loop = urwid.MainLoop(state.main_window, theme, handle_mouse=False, unhandled_input=InputHandler().handle_input)
+        state.main_loop.run()
     except urwid.AttrSpecError as e:
         print('Failed to initialize window: ' + str(e))
+
+
+state = State()
+
+if __name__ == '__main__':
+    main()
