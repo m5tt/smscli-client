@@ -564,8 +564,8 @@ class CommandHandler(object):
 
     def do_msg(self, args):
         """
-            /msg <contact_name/phone_number> - opens a new contact view
-            if contact doesnt exist, will create one using given phone number
+            /msg <contact_name/phone_number>
+            opens a new contact view if contact doesnt exist, will create one using given phone number
 
             invalid phone numbers and such are left for the server to deal with
         """
