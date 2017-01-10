@@ -16,7 +16,7 @@ Uses a irssi-like curses interface using the **urwid** library
 
 * The corresponding Android app - **smscli-server**, [here](https://github.com/m5tt/smscli-server)
 * The urwid python module
-* The gobject python module for notifications
+* Optionally the gobject python module for notifications
 
 ## Usage
 
