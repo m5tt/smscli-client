@@ -2,7 +2,7 @@
 A sms client in your console
 
 ## Features
-Send and receive sms messages all from your console
+Send and receive sms messages from your console
 
 Uses a irssi-like curses interface using the **urwid** module
 
