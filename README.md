@@ -21,7 +21,8 @@ Uses a irssi-like curses interface using the **urwid** library
 ## Usage
 
 Once the app is running, just run smscli-client and enter the command:
-`/connect <ip> <port>
+
+`/connect <ip> <port>`
 
 After that you can view and message any contact. Any incoming sms will be opened up in new windows.
 Any sms you send on your phone will also be synced in the respective view.
