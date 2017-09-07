@@ -34,4 +34,4 @@ Everything is more or less stable and working, but a few features are still miss
 
 ## TODO
 
-Needs some reworking, backend logic is too coupled/attached to the urwid libary
+Needs some reworking, backend logic is too coupled/attached to the urwid library
