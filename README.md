@@ -32,3 +32,6 @@ Any sms you send on your phone will also be synced in the respective view.
 Everything is more or less stable and working, but a few features are still missing. May be a little buggy too.
 
 
+## TODO
+
+Needs some reworking, backend logic is too coupled/attached to the urwid libary
